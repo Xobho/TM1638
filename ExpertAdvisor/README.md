@@ -35,6 +35,30 @@ File: [`MMBM_LiquiditySweep_EA.mq5`](MMBM_LiquiditySweep_EA.mq5)
 6. Pending orders that aren't filled within `InpPendingExpiryBars` LTF bars
    are cancelled and the setup resets.
 
+## Chart visuals
+
+Every stage of the setup is drawn live on the chart (toggle with
+`InpShowDrawings`):
+
+| Object | What it shows |
+|---|---|
+| Arrow + dotted ray | The liquidity sweep candle and the swept swing level (SSL/BSL) |
+| Blue segment, "MSS" | The market structure shift break level |
+| Filled rectangle, "FVG / POI" | The fair value gap used as the entry zone |
+| Dashed line, "Entry" | The pending limit order price |
+| Red line, "SL" | Stop loss, beyond the sweep extreme |
+| Green line, "TP" | Take profit, at the next liquidity pool (or fallback RR) |
+
+Objects are named `MMBM_<BUY|SELL>_<setupId>_...`, so each setup's drawings
+are independent and won't collide. By default (`InpClearInvalidatedSteps =
+true`) a setup's drawings are removed automatically if it never produces a
+filled trade (sweep without MSS, no FVG found, order expires unfilled) — so
+the chart only accumulates a permanent visual record for setups that actually
+traded. Set it to `false` to keep every attempt, including failed ones, for
+review. A one-line live status (`InpShowStatusComment`) is also shown via
+`Comment()` in the chart's top-left corner indicating each direction's
+current stage (idle / waiting for MSS / pending order placed).
+
 ## Key inputs
 
 | Input | Purpose |
@@ -46,6 +70,9 @@ File: [`MMBM_LiquiditySweep_EA.mq5`](MMBM_LiquiditySweep_EA.mq5)
 | `InpMinFVGSizePoints` | Minimum imbalance size to be considered tradable |
 | `InpRiskPercent` | Risk per trade as % of equity |
 | `InpMaxSpreadPoints` | Spread filter at order placement time |
+| `InpShowDrawings` | Master toggle for all chart objects |
+| `InpClearInvalidatedSteps` | Auto-remove drawings for setups that never filled |
+| `InpDeleteObjectsOnRemove` | Wipe all EA drawings when removed from the chart |
 
 ## Notes / disclaimer
 
