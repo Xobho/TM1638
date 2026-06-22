@@ -19,7 +19,7 @@
 //| lines once a pending order is placed.                            |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.20"
+#property version   "1.30"
 
 #include <Trade\Trade.mqh>
 #include <Trade\SymbolInfo.mqh>
@@ -47,6 +47,7 @@ input bool   InpShowDrawings        = true;         // Draw sweep/MSS/FVG/entry/
 input bool   InpClearInvalidatedSteps = true;        // Remove drawings for setups that fail before producing a trade
 input bool   InpDeleteObjectsOnRemove = false;       // Wipe all EA drawings when the EA is removed from the chart
 input bool   InpShowStatusComment   = true;          // Show a live status line via Comment()
+input bool   InpShowDashboard       = true;          // Show the on-chart info panel (account/risk/setup/position state)
 input color  InpColorSweepBull      = clrDodgerBlue; // Bullish sweep marker / swept level color
 input color  InpColorSweepBear      = clrOrange;     // Bearish sweep marker / swept level color
 input color  InpColorMSS            = clrBlue;       // MSS break level color
@@ -65,7 +66,8 @@ enum SetupState
   {
    STATE_IDLE,         // looking for a liquidity sweep
    STATE_WAIT_MSS,     // sweep found, waiting for market structure shift
-   STATE_WAIT_FILL     // MSS confirmed, pending limit order placed at FVG
+   STATE_WAIT_FILL,    // MSS confirmed, pending limit order placed at FVG
+   STATE_IN_TRADE      // pending order filled, position open and being tracked until close
   };
 
 struct Setup
@@ -95,8 +97,11 @@ CTrade        g_trade;
 CSymbolInfo   g_symbol;
 
 datetime g_lastLTFBarTime = 0;
+bool     g_htfBullBias = true;
+bool     g_htfBearBias = true;
 
 #define OBJ_PREFIX "MMBM_"
+#define DASH_PREFIX "MMBM_DASH_"
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -112,10 +117,26 @@ int OnInit()
    if(!g_symbol.Name(_Symbol))
       return INIT_FAILED;
 
-   if(InpShowDrawings && InpHistoryDays > 0)
+   if(!InpShowDashboard)
+      DeleteObjectsByPrefix(DASH_PREFIX);
+
+   if(DrawingsAllowed() && InpHistoryDays > 0)
       ScanHistory();
 
    return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//| The EA's strategy logic always runs on InpLTF_Timeframe data     |
+//| regardless of which chart it's attached to, but the chart-object |
+//| drawings are anchored to LTF bar widths/positions - if the chart |
+//| is showing a different period (e.g. H4) those tiny LTF-sized     |
+//| objects get crammed together and look like overlapping clutter.  |
+//| So drawings are only shown when the chart period matches.        |
+//+------------------------------------------------------------------+
+bool DrawingsAllowed()
+  {
+   return InpShowDrawings && (_Period == InpLTF_Timeframe);
   }
 
 //+------------------------------------------------------------------+
@@ -138,25 +159,27 @@ void OnTick()
 
    ManagePendingExpiry(newBar);
 
-   if(!newBar)
-      return;
+   if(newBar)
+     {
+      GetHTFBias(g_htfBullBias, g_htfBearBias);
 
-   bool htfBullBias = true, htfBearBias = true;
-   GetHTFBias(htfBullBias, htfBearBias);
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      int copied = CopyRates(_Symbol, InpLTF_Timeframe, 1, 200, rates);
+      if(copied >= 2 * InpSwingLeftRight + 10)
+        {
+         if(g_htfBullBias)
+            ProcessSetup(g_bull, rates, copied);
+         if(g_htfBearBias)
+            ProcessSetup(g_bear, rates, copied);
+        }
+     }
 
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int copied = CopyRates(_Symbol, InpLTF_Timeframe, 1, 200, rates);
-   if(copied < 2 * InpSwingLeftRight + 10)
-      return;
-
-   if(htfBullBias)
-      ProcessSetup(g_bull, rates, copied);
-   if(htfBearBias)
-      ProcessSetup(g_bear, rates, copied);
-
+   // dashboard/comment refresh every tick (cheap) so equity/P&L/spread stay live
    if(InpShowStatusComment)
-      UpdateStatusComment(htfBullBias, htfBearBias);
+      UpdateStatusComment(g_htfBullBias, g_htfBearBias);
+   if(InpShowDashboard)
+      UpdateDashboard(g_htfBullBias, g_htfBearBias);
   }
 
 //+------------------------------------------------------------------+
@@ -264,7 +287,7 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
          s.liquidityTime   = liquidityTime;
          s.mssTime         = 0;
 
-         if(InpShowDrawings)
+         if(DrawingsAllowed())
             DrawSweep(s);
         }
       return;
@@ -292,7 +315,7 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
          s.mssTime  = rates[mssIdx].time;
          s.mssLevel = mssLevel;
 
-         if(InpShowDrawings)
+         if(DrawingsAllowed())
             DrawMSS(s);
 
          double fvgHigh, fvgLow; datetime fvgTimeLeft, fvgTimeRight;
@@ -303,7 +326,7 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
             s.fvgTimeLeft  = fvgTimeLeft;
             s.fvgTimeRight = fvgTimeRight;
 
-            if(InpShowDrawings)
+            if(DrawingsAllowed())
                DrawFVG(s);
 
             PlacePendingOrder(s, rates, total);
@@ -545,7 +568,7 @@ void PlacePendingOrder(Setup &s, const MqlRates &rates[], int total)
       // signal/drawing-only mode: show the levels that would have been
       // traded but don't send a real order, and free the slot for the
       // next setup since there's no pending ticket to track.
-      if(InpShowDrawings)
+      if(DrawingsAllowed())
          DrawTradeLevels(s, entry, sl, tp);
       ResetSetup(s, false);
       return;
@@ -564,7 +587,7 @@ void PlacePendingOrder(Setup &s, const MqlRates &rates[], int total)
       s.pendingTicket    = g_trade.ResultOrder();
       s.pendingPlacedBar = 0;
 
-      if(InpShowDrawings)
+      if(DrawingsAllowed())
          DrawTradeLevels(s, entry, sl, tp);
      }
    else
@@ -604,6 +627,8 @@ void ManagePendingExpiry(bool newBar)
   {
    ManagePendingExpiryForSetup(g_bull, newBar);
    ManagePendingExpiryForSetup(g_bear, newBar);
+   ManageOpenPosition(g_bull);
+   ManageOpenPosition(g_bear);
   }
 
 void ManagePendingExpiryForSetup(Setup &s, bool newBar)
@@ -615,12 +640,18 @@ void ManagePendingExpiryForSetup(Setup &s, bool newBar)
      {
       // order is gone: either filled (now a position) or already removed
       if(!PositionExistsForSetup(s))
+        {
          ResetSetup(s, InpClearInvalidatedSteps);
+        }
       else
         {
-         // filled -> keep all drawings as the permanent trade record, just
-         // free up the slot so a new setup can be searched for.
-         ResetSetup(s, false);
+         // filled -> stop the entry line right here instead of letting it
+         // ray on forever, and switch to tracking the open position so the
+         // SL/TP lines can be capped at the bar the trade actually closes.
+         if(DrawingsAllowed())
+            TruncateLevelLine(SetupPrefix(s) + "Entry", iTime(_Symbol, InpLTF_Timeframe, 0));
+         s.pendingTicket = 0;
+         s.state         = STATE_IN_TRADE;
         }
       return;
      }
@@ -633,6 +664,26 @@ void ManagePendingExpiryForSetup(Setup &s, bool newBar)
      {
       g_trade.OrderDelete(s.pendingTicket);
       ResetSetup(s, InpClearInvalidatedSteps);
+     }
+  }
+
+void ManageOpenPosition(Setup &s)
+  {
+   if(s.state != STATE_IN_TRADE)
+      return;
+
+   if(!PositionExistsForSetup(s))
+     {
+      // trade closed (SL, TP, or manual) -> cap the SL/TP lines at the
+      // closing bar instead of leaving them raying right indefinitely,
+      // then free the slot so a new setup can be searched for.
+      if(DrawingsAllowed())
+        {
+         datetime now = iTime(_Symbol, InpLTF_Timeframe, 0);
+         TruncateLevelLine(SetupPrefix(s) + "SL", now);
+         TruncateLevelLine(SetupPrefix(s) + "TP", now);
+        }
+      ResetSetup(s, false);
      }
   }
 
@@ -788,6 +839,28 @@ void DrawLevelLine(string name, datetime t1, datetime t2, double price, color co
   }
 
 //+------------------------------------------------------------------+
+//| Stops a previously-drawn level line (and its label) at newTime    |
+//| instead of letting it ray right indefinitely - used when a       |
+//| pending order fills (caps the Entry line) or a position closes   |
+//| (caps the SL/TP lines), so live setups stop overlapping into      |
+//| whatever the next setup draws.                                   |
+//+------------------------------------------------------------------+
+void TruncateLevelLine(string name, datetime newTime)
+  {
+   if(ObjectFind(0, name) < 0)
+      return;
+   ObjectSetInteger(0, name, OBJPROP_TIME, 1, newTime);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+
+   string labelName = name + "Label";
+   if(ObjectFind(0, labelName) >= 0)
+     {
+      double price = ObjectGetDouble(0, labelName, OBJPROP_PRICE, 0);
+      ObjectMove(0, labelName, 0, newTime, price);
+     }
+  }
+
+//+------------------------------------------------------------------+
 string StateToString(SetupState st)
   {
    switch(st)
@@ -795,6 +868,7 @@ string StateToString(SetupState st)
       case STATE_IDLE:      return "Idle (scanning for sweep)";
       case STATE_WAIT_MSS:  return "Sweep found, waiting for MSS";
       case STATE_WAIT_FILL: return "MSS confirmed, pending order at FVG";
+      case STATE_IN_TRADE:  return "Position open, managing trade";
      }
    return "?";
   }
@@ -803,11 +877,102 @@ void UpdateStatusComment(bool bullBiasAllowed, bool bearBiasAllowed)
   {
    string txt = "=== MMBM Liquidity Sweep EA ===\n";
    txt += "Mode: " + (InpAutoTrade ? "AUTO-TRADE (live orders)" : "SIGNAL ONLY (no orders sent)") + "\n";
+   if(_Period != InpLTF_Timeframe)
+      txt += "WARNING: chart is on " + EnumToString((ENUM_TIMEFRAMES)_Period) + " but strategy TF is "
+           + EnumToString(InpLTF_Timeframe) + " - drawings hidden here, attach to the " + EnumToString(InpLTF_Timeframe)
+           + " chart to see them (trading still runs).\n";
    txt += "Bullish setup [" + (bullBiasAllowed ? "active" : "blocked by HTF bias") + "]: " + StateToString(g_bull.state) + "\n";
    txt += "Bearish setup [" + (bearBiasAllowed ? "active" : "blocked by HTF bias") + "]: " + StateToString(g_bear.state) + "\n";
    if(InpHistoryDays > 0)
       txt += "(History: last " + IntegerToString(InpHistoryDays) + " day(s) of completed setups drawn on chart)\n";
    Comment(txt);
+  }
+
+//+------------------------------------------------------------------+
+//| On-chart dashboard: a fixed corner panel (not anchored to bars)  |
+//| with live account/risk/setup/position info for running this as a |
+//| real, supervised live-trading EA.                                |
+//+------------------------------------------------------------------+
+void EnsureDashboardObjects()
+  {
+   if(ObjectFind(0, DASH_PREFIX + "BG") >= 0)
+      return;
+
+   int x = 10, y = 20, w = 290, rowH = 16;
+   string rows[] = {"Title","Mode","TF","Bias","Bull","Bear","Acct","Risk","Pos","Spread","Hist"};
+
+   ObjectCreate(0, DASH_PREFIX + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_XDISTANCE, x - 6);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_YDISTANCE, y - 6);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_YSIZE, ArraySize(rows) * rowH + 12);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_BGCOLOR, C'18,18,18');
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_COLOR, clrSilver);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_BACK, false);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_HIDDEN, true);
+
+   for(int i = 0; i < ArraySize(rows); i++)
+     {
+      string name = DASH_PREFIX + rows[i];
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + i * rowH);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
+      ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+  }
+
+void SetDashLine(string key, string text, color col)
+  {
+   string name = DASH_PREFIX + key;
+   if(ObjectFind(0, name) < 0)
+      return;
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+  }
+
+void UpdateDashboard(bool bullBiasAllowed, bool bearBiasAllowed)
+  {
+   EnsureDashboardObjects();
+
+   bool tfMatch = (_Period == InpLTF_Timeframe);
+
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   int posCount = 0; double posLots = 0; double posPnL = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      posCount++;
+      posLots += PositionGetDouble(POSITION_VOLUME);
+      posPnL  += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+
+   SetDashLine("Title", "=== MMBM Liquidity Sweep EA ===", clrYellow);
+   SetDashLine("Mode",  "Mode: " + (InpAutoTrade ? "AUTO-TRADE" : "SIGNAL ONLY"),
+               InpAutoTrade ? clrLimeGreen : clrOrange);
+   SetDashLine("TF",    "Chart: " + EnumToString((ENUM_TIMEFRAMES)_Period) + (tfMatch ? "  [OK]" : "  [MISMATCH]"),
+               tfMatch ? clrWhite : clrRed);
+   SetDashLine("Bias",  "Bias: Buy " + (bullBiasAllowed ? "OK" : "blocked") + " | Sell " + (bearBiasAllowed ? "OK" : "blocked"), clrWhite);
+   SetDashLine("Bull",  "Bull: " + StateToString(g_bull.state), clrDodgerBlue);
+   SetDashLine("Bear",  "Bear: " + StateToString(g_bear.state), clrOrange);
+   SetDashLine("Acct",  "Equity " + DoubleToString(equity, 2) + " | Bal " + DoubleToString(balance, 2), clrWhite);
+   SetDashLine("Risk",  "Risk/trade: " + DoubleToString(InpRiskPercent, 2) + "%", clrWhite);
+   SetDashLine("Pos",   "Open: " + IntegerToString(posCount) + " (" + DoubleToString(posLots, 2) + " lots)  P/L " + DoubleToString(posPnL, 2),
+               posPnL >= 0 ? clrLimeGreen : clrRed);
+   SetDashLine("Spread","Spread: " + IntegerToString((int)g_symbol.Spread()) + " pts (max " + IntegerToString(InpMaxSpreadPoints) + ")", clrWhite);
+   SetDashLine("Hist",  InpHistoryDays > 0 ? ("History: last " + IntegerToString(InpHistoryDays) + "d drawn") : "History: off", clrSilver);
   }
 
 //+------------------------------------------------------------------+
@@ -925,8 +1090,9 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
          else
             tp = bullish ? entry + slDistance * InpFallbackRR : entry - slDistance * InpFallbackRR;
 
-         datetime endTime = hr[mssIdx].time + PeriodSeconds(InpLTF_Timeframe) * (InpPendingExpiryBars + 10);
-         DrawTradeLevels(hs, entry, sl, tp, endTime, false);
+         datetime entryEnd, exitEnd; bool filled;
+         ComputeHistoricalLifecycle(hr, n, mssIdx, bullish, entry, sl, tp, entryEnd, filled, exitEnd);
+         DrawHistoricalTradeLevels(hs, entry, sl, tp, hr[mssIdx].time, entryEnd, exitEnd, filled);
         }
 
       // resume scanning after this setup's MSS bar so overlapping duplicates aren't found
@@ -980,6 +1146,62 @@ bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx,
         }
      }
    return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Walks forward through history to find when the entry would have  |
+//| been filled, and after that, when price first reaches SL or TP -  |
+//| so historical lines can stop at that "first re-test" bar instead  |
+//| of running for a fixed window and overlapping the next setup.    |
+//+------------------------------------------------------------------+
+void ComputeHistoricalLifecycle(const MqlRates &hr[], int n, int mssIdx, bool bullish,
+                                 double entry, double sl, double tp,
+                                 datetime &entryEnd, bool &filled, datetime &exitEnd)
+  {
+   filled   = false;
+   entryEnd = hr[mssIdx].time + PeriodSeconds(InpLTF_Timeframe) * InpPendingExpiryBars;
+   exitEnd  = 0;
+
+   int fillIdx = -1;
+   int maxFillIdx = MathMin(n - 1, mssIdx + InpPendingExpiryBars);
+   for(int j = mssIdx + 1; j <= maxFillIdx; j++)
+     {
+      bool touched = bullish ? (hr[j].low <= entry) : (hr[j].high >= entry);
+      if(touched) { fillIdx = j; break; }
+     }
+   if(fillIdx < 0)
+      return; // pending order would have expired unfilled
+
+   filled   = true;
+   entryEnd = hr[fillIdx].time;
+
+   for(int j = fillIdx; j < n; j++)
+     {
+      bool hitSL = bullish ? (hr[j].low <= sl) : (hr[j].high >= sl);
+      bool hitTP = bullish ? (hr[j].high >= tp) : (hr[j].low <= tp);
+      if(hitSL || hitTP)
+        {
+         exitEnd = hr[j].time;
+         return;
+        }
+     }
+   exitEnd = hr[n - 1].time; // still open at the edge of the scanned history window
+  }
+
+void DrawHistoricalTradeLevels(const Setup &s, double entry, double sl, double tp,
+                                datetime entryStart, datetime entryEnd, datetime exitEnd, bool filled)
+  {
+   string pfx = SetupPrefix(s);
+   DrawLevelLine(pfx + "Entry", entryStart, entryEnd, entry, InpColorEntry, STYLE_DASH,
+                 filled ? "Entry" : "Entry (unfilled)", false);
+
+   // only draw SL/TP if the order would actually have been filled - otherwise
+   // there's no real trade for them to represent.
+   if(filled)
+     {
+      DrawLevelLine(pfx + "SL", entryEnd, exitEnd, sl, InpColorSL, STYLE_SOLID, "SL", false);
+      DrawLevelLine(pfx + "TP", entryEnd, exitEnd, tp, InpColorTP, STYLE_SOLID, "TP", false);
+     }
   }
 
 //+------------------------------------------------------------------+

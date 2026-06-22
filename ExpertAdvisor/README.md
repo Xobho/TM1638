@@ -45,9 +45,20 @@ Every stage of the setup is drawn live on the chart (toggle with
 | Arrow + dotted ray | The liquidity sweep candle. The dotted ray now runs from the original swing point that formed the liquidity all the way to the candle that swept it, so it's clear *which* level got hunted, not just where the sweep happened |
 | Blue segment, "MSS" | The market structure shift break level |
 | Filled rectangle, "FVG / POI" | The fair value gap used as the entry zone — bounded tightly to the actual 3-candle gap, not stretched across the whole impulse leg |
-| Dashed line, "Entry" | The pending limit order price |
-| Red line, "SL" | Stop loss, beyond the sweep extreme |
-| Green line, "TP" | Take profit, at the next liquidity pool (or fallback RR) |
+| Dashed line, "Entry" | The pending limit order price. Stops where it was actually filled (or at expiry if it never filled), rather than raying on forever |
+| Red line, "SL" | Stop loss, beyond the sweep extreme. Starts at the fill and stops at the bar the trade closed |
+| Green line, "TP" | Take profit, at the next liquidity pool (or fallback RR). Same start/stop behavior as SL |
+
+**Drawings only appear when the attached chart's period matches
+`InpLTF_Timeframe`.** The strategy itself always operates on
+`InpLTF_Timeframe` data regardless of which chart the EA is running on, but
+the sweep/MSS/FVG/entry objects are sized to LTF bars — viewed on a higher
+timeframe chart (e.g. H4 while the strategy runs on M15) they'd be crammed
+into a tiny sliver of a single H4 candle and look like overlapping clutter.
+If you attach the EA to a chart on a different period, trading still runs
+normally, but you'll see a "chart/strategy timeframe mismatch" warning in
+the status comment and dashboard instead of garbled drawings — switch the
+chart to `InpLTF_Timeframe` to see them.
 
 Objects are named `MMBM_<BUY|SELL>_<setupId>_...`, so each setup's drawings
 are independent and won't collide. By default (`InpClearInvalidatedSteps =
@@ -57,7 +68,26 @@ the chart only accumulates a permanent visual record for setups that actually
 traded. Set it to `false` to keep every attempt, including failed ones, for
 review. A one-line live status (`InpShowStatusComment`) is also shown via
 `Comment()` in the chart's top-left corner indicating each direction's
-current stage (idle / waiting for MSS / pending order placed).
+current stage (idle / waiting for MSS / pending order placed / in trade).
+
+## Dashboard
+
+A fixed info panel in the top-left corner (toggle with `InpShowDashboard`,
+on by default) shows, refreshed every tick:
+
+- Trading mode (auto-trade vs. signal-only) and whether the chart's
+  timeframe matches the strategy's `InpLTF_Timeframe`
+- HTF bias (buy/sell allowed or blocked)
+- Each direction's current state (idle / waiting for MSS / pending order /
+  in trade)
+- Account equity and balance, and the configured risk per trade
+- Open positions for this EA (count, lots, floating P/L)
+- Current spread vs. the spread filter
+
+Unlike `Comment()`, this is a real chart object panel (`OBJ_RECTANGLE_LABEL`
++ `OBJ_LABEL` rows) so it persists independently of any other comment usage
+and is meant to be the primary live-monitoring view for running this as a
+supervised live-trading EA.
 
 ## Seeing history
 
@@ -119,7 +149,8 @@ The current mode is shown on the first line of the on-chart status comment
 | `InpRiskPercent` | Risk per trade as % of equity |
 | `InpMaxSpreadPoints` | Spread filter at order placement time |
 | `InpAutoTrade` | `true` = place real orders, `false` = draw setups only, no orders sent |
-| `InpShowDrawings` | Master toggle for all chart objects |
+| `InpShowDrawings` | Master toggle for all chart objects (only renders when chart period == `InpLTF_Timeframe`) |
+| `InpShowDashboard` | Toggle the live info panel (account/risk/setup/position state) |
 | `InpClearInvalidatedSteps` | Auto-remove drawings for setups that never filled |
 | `InpDeleteObjectsOnRemove` | Wipe all EA drawings when removed from the chart |
 | `InpHistoryDays` | Days of history to scan and draw on init (0 = off) |
