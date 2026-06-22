@@ -6,6 +6,20 @@ import json
 from pathlib import Path
 
 
+def candles_to_dicts(rates, limit: int = 200) -> list[dict]:
+    out = []
+    for r in rates[-limit:]:
+        out.append({
+            "time": int(r["time"]),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": int(r["tick_volume"]),
+        })
+    return out
+
+
 def load_events(path: str) -> list[dict]:
     p = Path(path)
     events = []

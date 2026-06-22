@@ -11,6 +11,7 @@ from pathlib import Path
 import MetaTrader5 as mt5
 
 from .ai_analyst import AIAnalyst, TradeDecision
+from .analytics import candles_to_dicts
 from .config import Config
 from .journal import TradeJournal
 from .mt5_client import MT5Client
@@ -31,20 +32,6 @@ def _setup_logging(log_dir: str) -> None:
             logging.FileHandler(Path(log_dir) / "bridge.log"),
         ],
     )
-
-
-def _candles_to_dicts(rates, limit: int = 200) -> list[dict]:
-    out = []
-    for r in rates[-limit:]:
-        out.append({
-            "time": int(r["time"]),
-            "open": float(r["open"]),
-            "high": float(r["high"]),
-            "low": float(r["low"]),
-            "close": float(r["close"]),
-            "volume": int(r["tick_volume"]),
-        })
-    return out
 
 
 class Agent:
@@ -226,7 +213,7 @@ class Agent:
                 "profit": p.profit,
             }
 
-        candles = _candles_to_dicts(rates, self.bars)
+        candles = candles_to_dicts(rates, self.bars)
         regime = compute_regime(candles)
         performance = {
             "overall": rolling_stats(self.journal.path, symbol, regime_label=None, lookback=30),

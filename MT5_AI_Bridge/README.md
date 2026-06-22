@@ -112,6 +112,37 @@ over time — the basis for eventually deciding which decision logic (AI
 judgment, or a coded rules-based strategy) should be trusted in which
 regime, rather than running one approach blindly in all conditions.
 
+## Backtesting (accumulating data faster than real time)
+
+`backtest.py` replays historical candles through the same `AIAnalyst` the
+live bridge uses, one closed-candle decision at a time, in chronological
+order — so the regime/performance context at each simulated decision only
+ever sees data that would actually have been available at that moment (no
+lookahead). Results go to a **separate journal**
+(`logs/backtest_journal.jsonl` by default) so they never mix with the live
+bridge's own performance memory.
+
+This makes real, billed Anthropic API calls — one per closed candle in the
+requested window. It always prints a cost estimate first and requires
+typing `y` to confirm (or pass `--yes` to skip the prompt) before spending
+anything:
+
+```bash
+python backtest.py --symbol EURUSD --timeframe M15 --days 30
+```
+
+The estimate is a rough heuristic (chars/4 ≈ tokens, fixed $3/$15 per
+million input/output tokens) — check the real rate for your model on
+[the Anthropic pricing page](https://docs.anthropic.com/en/docs/about-claude/pricing)
+before relying on it. As a reference point, 200-bar lookback windows on
+`M15`: ~30 days ≈ 2,680 calls ≈ $50-55; ~7 days ≈ 470 calls ≈ $9-10.
+
+Trade simulation fills at the close of the decision candle and resolves
+SL/TP by scanning forward through subsequent historical bars — it does not
+place anything on the broker. Run `python report.py --journal
+logs/backtest_journal.jsonl` afterward to see the same win-rate/avg-R/regime
+breakdown as live trading.
+
 ## Reporting — what's actually working
 
 Every decision the AI makes (including holds) and every trade outcome —
@@ -163,6 +194,7 @@ than another. Use `--journal <path>` to point at a different journal file.
 | `mt5_ai_bridge/ai_analyst.py` | Builds the prompt, calls Claude, parses the JSON decision |
 | `mt5_ai_bridge/risk.py` | All trade-approval guardrails in one place |
 | `mt5_ai_bridge/agent.py` | Main loop tying the above together |
+| `backtest.py` | Walk-forward backtest against historical candles, with a cost estimate gate before any API spend |
 
 ## Disclaimer
 

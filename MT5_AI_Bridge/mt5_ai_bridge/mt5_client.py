@@ -82,6 +82,17 @@ class MT5Client:
             raise MT5ConnectionError(f"copy_rates_from_pos failed for {symbol}: {mt5.last_error()}")
         return rates
 
+    def get_rates_range(self, symbol: str, timeframe: str, date_from, date_to):
+        """Pulls all bars between two datetimes — used by backtest.py, not the live loop
+        (which only ever wants the most recent N bars via get_rates)."""
+        tf = TIMEFRAME_MAP.get(timeframe.upper())
+        if tf is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+        rates = mt5.copy_rates_range(symbol, tf, date_from, date_to)
+        if rates is None or len(rates) == 0:
+            raise MT5ConnectionError(f"copy_rates_range failed for {symbol}: {mt5.last_error()}")
+        return rates
+
     def get_tick(self, symbol: str):
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
