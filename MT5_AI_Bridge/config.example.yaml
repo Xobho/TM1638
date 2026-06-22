@@ -1,0 +1,36 @@
+# Copy this file to config.yaml and fill in your own values.
+# config.yaml is gitignored — never commit real credentials.
+
+mt5:
+  # Leave path/login/password/server blank to attach to an already-logged-in
+  # terminal (the bridge just needs MT5 running with a chart open).
+  # Fill them in if you want this script to log in itself.
+  terminal_path: ""      # e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
+  login: 0
+  password: ""
+  server: ""
+
+anthropic:
+  api_key_env: "ANTHROPIC_API_KEY"   # name of the env var holding the key
+  model: "claude-sonnet-4-6"
+
+trading:
+  symbols: ["EURUSD"]
+  timeframe: "M15"        # M1, M5, M15, M30, H1, H4, D1
+  bars: 200               # how many recent candles to feed the model
+  poll_seconds: 60        # how often to check for a new closed candle
+  magic_number: 990177
+
+risk:
+  # SAFETY: dry_run must be explicitly set to false to ever send a real order.
+  dry_run: true
+  max_risk_percent_per_trade: 1.0
+  max_open_positions: 3
+  max_daily_trades: 6
+  max_spread_points: 30
+  min_confidence: 0.65     # ignore AI signals below this confidence
+  fallback_rr: 2.0         # used if the AI doesn't supply a take-profit
+
+logging:
+  log_dir: "logs"
+  log_ai_responses: true
