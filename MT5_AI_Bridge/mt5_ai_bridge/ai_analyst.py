@@ -80,7 +80,7 @@ class AIAnalyst:
         }
         message = self._client.messages.create(
             model=self._model,
-            max_tokens=400,
+            max_tokens=700,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": json.dumps(user_payload)}],
         )
@@ -88,6 +88,12 @@ class AIAnalyst:
         return self._parse(text)
 
     def _parse(self, text: str) -> TradeDecision:
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+            text = text.strip()
         try:
             data = json.loads(text)
             action = str(data.get("action", "hold")).lower()
