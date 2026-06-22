@@ -42,9 +42,9 @@ Every stage of the setup is drawn live on the chart (toggle with
 
 | Object | What it shows |
 |---|---|
-| Arrow + dotted ray | The liquidity sweep candle and the swept swing level (SSL/BSL) |
+| Arrow + dotted ray | The liquidity sweep candle. The dotted ray now runs from the original swing point that formed the liquidity all the way to the candle that swept it, so it's clear *which* level got hunted, not just where the sweep happened |
 | Blue segment, "MSS" | The market structure shift break level |
-| Filled rectangle, "FVG / POI" | The fair value gap used as the entry zone |
+| Filled rectangle, "FVG / POI" | The fair value gap used as the entry zone — bounded tightly to the actual 3-candle gap, not stretched across the whole impulse leg |
 | Dashed line, "Entry" | The pending limit order price |
 | Red line, "SL" | Stop loss, beyond the sweep extreme |
 | Green line, "TP" | Take profit, at the next liquidity pool (or fallback RR) |
@@ -83,6 +83,29 @@ immediately:
   and `InpDeleteObjectsOnRemove` clears both.
 - Historical setups are **not** filtered by HTF bias and never place real
   orders — they're for visual review only.
+- The history scanner advances past a sweep candle as soon as one is found,
+  even if the later MSS or FVG search for that sweep fails, instead of only
+  advancing on full success. This prevents an adjacent swing point inside the
+  same consolidation from re-detecting the same sweep and drawing
+  near-duplicate Sweep/MSS/FVG labels on top of each other.
+
+## Live trading
+
+The EA places real pending orders (`BuyLimit`/`SellLimit`) the moment a setup
+completes (sweep → MSS → FVG), sized by `InpRiskPercent` of equity. Two
+things are required for it to actually trade:
+
+1. **`InpAutoTrade = true`** (default). Set it to `false` to switch the EA
+   into signal/drawing-only mode: every completed setup is still drawn in
+   full (sweep, MSS, FVG, entry/SL/TP) but no order is sent — useful for
+   watching the strategy call setups live before risking money.
+2. **MT5's "AutoTrading" button** (top toolbar) must be enabled, and the EA
+   must be allowed to trade in its Common tab settings — this is a
+   terminal-level switch independent of `InpAutoTrade` and MT5 will silently
+   refuse to send orders without it.
+
+The current mode is shown on the first line of the on-chart status comment
+(`InpShowStatusComment`).
 
 ## Key inputs
 
@@ -95,10 +118,36 @@ immediately:
 | `InpMinFVGSizePoints` | Minimum imbalance size to be considered tradable |
 | `InpRiskPercent` | Risk per trade as % of equity |
 | `InpMaxSpreadPoints` | Spread filter at order placement time |
+| `InpAutoTrade` | `true` = place real orders, `false` = draw setups only, no orders sent |
 | `InpShowDrawings` | Master toggle for all chart objects |
 | `InpClearInvalidatedSteps` | Auto-remove drawings for setups that never filled |
 | `InpDeleteObjectsOnRemove` | Wipe all EA drawings when removed from the chart |
 | `InpHistoryDays` | Days of history to scan and draw on init (0 = off) |
+
+## Ideas to make the strategy more effective
+
+Not implemented yet — listed here as candidates if you want to take this
+further:
+
+- **Killzone / session time filter.** Only arm the state machine during
+  specific session windows (e.g. London/NY open) instead of 24/5 — ICT
+  liquidity sweeps are far more reliable inside known killzones than at
+  random times.
+- **Displacement filter on the MSS leg.** Require the MSS candle (or the
+  leg into it) to be a strong-bodied, above-average-range candle, not just
+  any close beyond the reference swing — filters out weak/grindy breaks.
+- **Equal highs/lows as additional liquidity pools.** Current sweep
+  detection only uses fractal swing points; adding equal-highs/equal-lows
+  clusters as extra liquidity targets (common ICT POI) would catch more
+  valid setups and better TP targets.
+- **Daily/weekly bias layer above the current H4 bias** for a stronger
+  top-down directional filter.
+- **Partial take-profit / breakeven management** once price reaches a
+  first liquidity pool, instead of one fixed TP.
+- **Max daily risk / max trades per day guard** to cap drawdown from a bad
+  session.
+- **News/high-impact-event filter** to avoid placing pending orders into
+  known volatility spikes.
 
 ## Notes / disclaimer
 

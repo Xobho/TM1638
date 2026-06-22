@@ -19,7 +19,7 @@
 //| lines once a pending order is placed.                            |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.10"
+#property version   "1.20"
 
 #include <Trade\Trade.mqh>
 #include <Trade\SymbolInfo.mqh>
@@ -40,6 +40,7 @@ input int             InpPendingExpiryBars    = 20;          // Cancel an unfill
 input int             InpMaxSpreadPoints      = 30;          // Skip new entries if spread exceeds this
 input ulong           InpMagicNumber          = 19380001;    // Magic number for this EA's orders
 input bool            InpOneSetupAtATime      = true;        // Only manage one active setup per direction at a time
+input bool            InpAutoTrade            = true;        // true = place real pending orders. false = signal/drawing only, no orders sent
 
 input group "=== Chart Visuals ==="
 input bool   InpShowDrawings        = true;         // Draw sweep/MSS/FVG/entry/SL/TP objects on the chart
@@ -75,11 +76,14 @@ struct Setup
    int        setupId;
    double     sweepExtreme;    // price of the liquidity sweep wick
    double     liquidityLevel;  // the swing price that was swept
+   datetime   liquidityTime;   // bar time of the original swing point that was later swept
    datetime   sweepTime;       // bar time of the sweep candle (stable across re-copies of rates[])
    datetime   mssTime;         // bar time of the MSS confirmation candle
    double     mssLevel;        // the price level broken to confirm MSS
    double     fvgHigh;
    double     fvgLow;
+   datetime   fvgTimeLeft;     // time of the older of the two outer FVG candles
+   datetime   fvgTimeRight;    // time of the newer of the two outer FVG candles
    ulong      pendingTicket;
    int        pendingPlacedBar;
   };
@@ -249,14 +253,15 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
 
    if(s.state == STATE_IDLE)
      {
-      int sweepIdx; double sweepPrice; double liquidityLevel;
-      if(FindLiquiditySweep(rates, total, s.bullish, sweepIdx, sweepPrice, liquidityLevel))
+      int sweepIdx; double sweepPrice; double liquidityLevel; datetime liquidityTime;
+      if(FindLiquiditySweep(rates, total, s.bullish, sweepIdx, sweepPrice, liquidityLevel, liquidityTime))
         {
          s.state          = STATE_WAIT_MSS;
          s.setupId         = ++g_setupCounter;
          s.sweepTime       = rates[sweepIdx].time;
          s.sweepExtreme    = sweepPrice;
          s.liquidityLevel  = liquidityLevel;
+         s.liquidityTime   = liquidityTime;
          s.mssTime         = 0;
 
          if(InpShowDrawings)
@@ -290,11 +295,13 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
          if(InpShowDrawings)
             DrawMSS(s);
 
-         double fvgHigh, fvgLow;
-         if(FindEntryFVG(rates, sweepIdx, mssIdx, s.bullish, fvgHigh, fvgLow))
+         double fvgHigh, fvgLow; datetime fvgTimeLeft, fvgTimeRight;
+         if(FindEntryFVG(rates, sweepIdx, mssIdx, s.bullish, fvgHigh, fvgLow, fvgTimeLeft, fvgTimeRight))
            {
-            s.fvgHigh = fvgHigh;
-            s.fvgLow  = fvgLow;
+            s.fvgHigh     = fvgHigh;
+            s.fvgLow      = fvgLow;
+            s.fvgTimeLeft  = fvgTimeLeft;
+            s.fvgTimeRight = fvgTimeRight;
 
             if(InpShowDrawings)
                DrawFVG(s);
@@ -314,7 +321,7 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
 //| Liquidity sweep: a wick pierces a prior swing low (bullish) or    |
 //| swing high (bearish) and the candle closes back inside.           |
 //+------------------------------------------------------------------+
-bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweepIdx, double &sweepPrice, double &liquidityLevel)
+bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweepIdx, double &sweepPrice, double &liquidityLevel, datetime &liquidityTime)
   {
    int k = InpSwingLeftRight;
    // look for the most recent fully-formed swing point, then check if a later,
@@ -331,6 +338,7 @@ bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweep
                sweepIdx       = j;
                sweepPrice     = r[j].low;
                liquidityLevel = level;
+               liquidityTime  = r[i].time;
                return true;
               }
            }
@@ -345,6 +353,7 @@ bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweep
                sweepIdx       = j;
                sweepPrice     = r[j].high;
                liquidityLevel = level;
+               liquidityTime  = r[i].time;
                return true;
               }
            }
@@ -405,7 +414,7 @@ bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int 
 //| Fair Value Gap (3-candle imbalance) inside the impulse leg that   |
 //| produced the MSS - the re-entry point of interest (POI).         |
 //+------------------------------------------------------------------+
-bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow)
+bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow, datetime &fvgTimeLeft, datetime &fvgTimeRight)
   {
    double point = g_symbol.Point();
    double minSize = InpMinFVGSizePoints * point;
@@ -418,6 +427,7 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
    for(int i = searchTo + 1; i <= searchFrom - 1; i++)
      {
       // candle pattern uses three consecutive candles: i+1 (older), i (middle), i-1 (newer)
+      // (series order: index 0 = newest, so the older candle has the larger index)
       if(i - 1 < 0 || i + 1 >= ArraySize(r))
          continue;
 
@@ -427,8 +437,10 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
          double gapHigh = r[i + 1].high;
          if(gapLow > gapHigh && (gapLow - gapHigh) >= minSize)
            {
-            fvgLow  = gapHigh;
-            fvgHigh = gapLow;
+            fvgLow      = gapHigh;
+            fvgHigh     = gapLow;
+            fvgTimeLeft  = r[i + 1].time;
+            fvgTimeRight = r[i - 1].time;
             return true;
            }
         }
@@ -438,8 +450,10 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
          double gapLow  = r[i + 1].low;
          if(gapLow > gapHigh && (gapLow - gapHigh) >= minSize)
            {
-            fvgLow  = gapHigh;
-            fvgHigh = gapLow;
+            fvgLow      = gapHigh;
+            fvgHigh     = gapLow;
+            fvgTimeLeft  = r[i + 1].time;
+            fvgTimeRight = r[i - 1].time;
             return true;
            }
         }
@@ -525,6 +539,17 @@ void PlacePendingOrder(Setup &s, const MqlRates &rates[], int total)
    entry = NormalizeDouble(entry, g_symbol.Digits());
    sl    = NormalizeDouble(sl, g_symbol.Digits());
    tp    = NormalizeDouble(tp, g_symbol.Digits());
+
+   if(!InpAutoTrade)
+     {
+      // signal/drawing-only mode: show the levels that would have been
+      // traded but don't send a real order, and free the slot for the
+      // next setup since there's no pending ticket to track.
+      if(InpShowDrawings)
+         DrawTradeLevels(s, entry, sl, tp);
+      ResetSetup(s, false);
+      return;
+     }
 
    bool ok;
    if(s.bullish)
@@ -670,9 +695,13 @@ void DrawSweep(const Setup &s)
    ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 3);
    ObjectSetInteger(0, arrowName, OBJPROP_ANCHOR, s.bullish ? ANCHOR_TOP : ANCHOR_BOTTOM);
 
+   // dotted ray runs from where the liquidity actually formed (the original
+   // swing point) up to the sweep candle that grabbed it, so the level being
+   // hunted is visually obvious instead of just appearing at the sweep bar.
+   datetime levelStart = (s.liquidityTime != 0) ? s.liquidityTime : s.sweepTime;
    string levelName = pfx + "SweptLevel";
-   ObjectCreate(0, levelName, OBJ_TREND, 0, s.sweepTime, s.liquidityLevel,
-                s.sweepTime + PeriodSeconds(InpLTF_Timeframe) * 40, s.liquidityLevel);
+   ObjectCreate(0, levelName, OBJ_TREND, 0, levelStart, s.liquidityLevel,
+                s.sweepTime, s.liquidityLevel);
    ObjectSetInteger(0, levelName, OBJPROP_COLOR, col);
    ObjectSetInteger(0, levelName, OBJPROP_STYLE, STYLE_DOT);
    ObjectSetInteger(0, levelName, OBJPROP_WIDTH, 1);
@@ -710,9 +739,13 @@ void DrawFVG(const Setup &s)
    color  col  = s.bullish ? InpColorFVGBull : InpColorFVGBear;
    string name = pfx + "FVG";
 
-   datetime t2 = s.mssTime + PeriodSeconds(InpLTF_Timeframe) * (InpPendingExpiryBars + 5);
+   // bounded tightly to the actual 3-candle gap (the outer two candles'
+   // timestamps), not stretched across the whole sweep->MSS impulse leg.
+   datetime t1 = (s.fvgTimeLeft  != 0) ? s.fvgTimeLeft  : s.sweepTime;
+   datetime t2raw = (s.fvgTimeRight != 0) ? s.fvgTimeRight : s.mssTime;
+   datetime t2 = t2raw + PeriodSeconds(InpLTF_Timeframe); // include the right candle's full width
 
-   ObjectCreate(0, name, OBJ_RECTANGLE, 0, s.sweepTime, s.fvgHigh, t2, s.fvgLow);
+   ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, s.fvgHigh, t2, s.fvgLow);
    ObjectSetInteger(0, name, OBJPROP_COLOR, col);
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
    ObjectSetInteger(0, name, OBJPROP_BACK, true);
@@ -720,7 +753,7 @@ void DrawFVG(const Setup &s)
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 
    string labelName = pfx + "FVGLabel";
-   ObjectCreate(0, labelName, OBJ_TEXT, 0, s.mssTime, s.fvgHigh);
+   ObjectCreate(0, labelName, OBJ_TEXT, 0, t2, s.fvgHigh);
    ObjectSetString(0, labelName, OBJPROP_TEXT, " FVG / POI");
    ObjectSetInteger(0, labelName, OBJPROP_COLOR, col);
    ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
@@ -769,6 +802,7 @@ string StateToString(SetupState st)
 void UpdateStatusComment(bool bullBiasAllowed, bool bearBiasAllowed)
   {
    string txt = "=== MMBM Liquidity Sweep EA ===\n";
+   txt += "Mode: " + (InpAutoTrade ? "AUTO-TRADE (live orders)" : "SIGNAL ONLY (no orders sent)") + "\n";
    txt += "Bullish setup [" + (bullBiasAllowed ? "active" : "blocked by HTF bias") + "]: " + StateToString(g_bull.state) + "\n";
    txt += "Bearish setup [" + (bearBiasAllowed ? "active" : "blocked by HTF bias") + "]: " + StateToString(g_bear.state) + "\n";
    if(InpHistoryDays > 0)
@@ -821,6 +855,11 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
       if(sweepIdx < 0)
          continue;
 
+      // From here on, any failure still advances the outer loop past this
+      // sweep candle (instead of just i+1) so an adjacent swing point inside
+      // the same consolidation can't re-detect the same sweep and produce
+      // duplicate-looking drawings.
+
       // forward search for the opposing minor swing (the MSS reference level)
       double refLevel = 0; int refIdx = -1;
       for(int m = sweepIdx + k; m < n - k && m <= sweepIdx + InpMaxBarsAfterSweep; m++)
@@ -829,7 +868,10 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
          if(!bullish && IsSwingLow(hr, m, k))  { refLevel = hr[m].low;  refIdx = m; break; }
         }
       if(refIdx < 0)
+        {
+         i = sweepIdx;
          continue;
+        }
 
       // forward search for the MSS confirmation (close beyond refLevel)
       int mssIdx = -1;
@@ -839,12 +881,18 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
          if(!bullish && hr[j].close < refLevel) { mssIdx = j; break; }
         }
       if(mssIdx < 0)
+        {
+         i = sweepIdx;
          continue;
+        }
 
       // search the impulse leg (sweepIdx..mssIdx) for the entry FVG, nearest to mssIdx first
-      double fvgHigh = 0, fvgLow = 0;
-      if(!FindEntryFVGAscending(hr, n, sweepIdx, mssIdx, bullish, fvgHigh, fvgLow))
+      double fvgHigh = 0, fvgLow = 0; datetime fvgTimeLeft = 0, fvgTimeRight = 0;
+      if(!FindEntryFVGAscending(hr, n, sweepIdx, mssIdx, bullish, fvgHigh, fvgLow, fvgTimeLeft, fvgTimeRight))
+        {
+         i = mssIdx;
          continue;
+        }
 
       Setup hs;
       ZeroMemory(hs);
@@ -854,10 +902,13 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
       hs.sweepTime       = hr[sweepIdx].time;
       hs.sweepExtreme    = sweepPrice;
       hs.liquidityLevel  = level;
+      hs.liquidityTime   = hr[i].time;
       hs.mssTime         = hr[mssIdx].time;
       hs.mssLevel        = refLevel;
       hs.fvgHigh         = fvgHigh;
       hs.fvgLow          = fvgLow;
+      hs.fvgTimeLeft     = fvgTimeLeft;
+      hs.fvgTimeRight    = fvgTimeRight;
 
       DrawSweep(hs);
       DrawMSS(hs);
@@ -887,7 +938,7 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
 //| Same 3-candle FVG search as FindEntryFVG, but for an ascending    |
 //| (oldest-first) historical array.                                  |
 //+------------------------------------------------------------------+
-bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow)
+bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow, datetime &fvgTimeLeft, datetime &fvgTimeRight)
   {
    double point = g_symbol.Point();
    double minSize = InpMinFVGSizePoints * point;
@@ -895,6 +946,7 @@ bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx,
    int searchFrom = MathMax(sweepIdx, mssIdx - InpMaxBarsForFVGSearch);
 
    // scan from the bar closest to "now" (mssIdx) backward toward the sweep
+   // (ascending order: index 0 = oldest, so the older candle has the smaller index)
    for(int i = mssIdx - 1; i > searchFrom; i--)
      {
       if(i - 1 < 0 || i + 1 >= n)
@@ -906,8 +958,10 @@ bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx,
          double gapHigh = r[i - 1].high;
          if(gapLow > gapHigh && (gapLow - gapHigh) >= minSize)
            {
-            fvgLow  = gapHigh;
-            fvgHigh = gapLow;
+            fvgLow      = gapHigh;
+            fvgHigh     = gapLow;
+            fvgTimeLeft  = r[i - 1].time;
+            fvgTimeRight = r[i + 1].time;
             return true;
            }
         }
@@ -917,8 +971,10 @@ bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx,
          double gapLow  = r[i - 1].low;
          if(gapLow > gapHigh && (gapLow - gapHigh) >= minSize)
            {
-            fvgLow  = gapHigh;
-            fvgHigh = gapLow;
+            fvgLow      = gapHigh;
+            fvgHigh     = gapLow;
+            fvgTimeLeft  = r[i - 1].time;
+            fvgTimeRight = r[i + 1].time;
             return true;
            }
         }
