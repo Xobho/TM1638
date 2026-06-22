@@ -85,6 +85,9 @@ class AIAnalyst:
             messages=[{"role": "user", "content": json.dumps(user_payload)}],
         )
         text = "".join(block.text for block in message.content if block.type == "text").strip()
+        if not text:
+            log.warning("Empty response text from model (stop_reason=%s, usage=%s)",
+                        message.stop_reason, message.usage)
         return self._parse(text)
 
     def _parse(self, text: str) -> TradeDecision:
