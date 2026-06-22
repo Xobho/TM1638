@@ -8,8 +8,11 @@ import logging
 import time
 from pathlib import Path
 
+import MetaTrader5 as mt5
+
 from .ai_analyst import AIAnalyst, TradeDecision
 from .config import Config
+from .journal import TradeJournal
 from .mt5_client import MT5Client
 from .risk import RiskLimits, RiskManager
 
@@ -82,6 +85,11 @@ class Agent:
         self.log_ai_responses = config.logging_cfg.get("log_ai_responses", True)
         self._last_bar_time: dict[str, int] = {}
 
+        log_dir = config.logging_cfg.get("log_dir", "logs")
+        self.journal = TradeJournal(str(Path(log_dir) / "trade_journal.jsonl"))
+        self._virtual_trades: dict[str, dict] = {}   # dry-run open "trades" by symbol
+        self._open_tickets: dict[str, int] = {}      # real open position tickets by symbol
+
         if self.risk.limits.dry_run:
             log.warning("DRY RUN MODE — no real orders will be sent. Set risk.dry_run: false to go live.")
         else:
@@ -93,6 +101,7 @@ class Agent:
             while True:
                 for symbol in self.symbols:
                     try:
+                        self._check_open_trades(symbol)
                         self._process_symbol(symbol)
                     except Exception:
                         log.exception("Error processing %s", symbol)
@@ -104,9 +113,39 @@ class Agent:
         self.mt5.connect()
         try:
             for symbol in self.symbols:
+                self._check_open_trades(symbol)
                 self._process_symbol(symbol, force=True)
         finally:
             self.mt5.shutdown()
+
+    def _check_open_trades(self, symbol: str) -> None:
+        """Detects fills/closes since the last poll and writes outcomes to the journal."""
+        v = self._virtual_trades.get(symbol)
+        if v is not None:
+            tick = self.mt5.get_tick(symbol)
+            is_buy = v["action"] == "buy"
+            price = tick.bid if is_buy else tick.ask
+            hit_sl = price <= v["sl"] if is_buy else price >= v["sl"]
+            hit_tp = price >= v["tp"] if is_buy else price <= v["tp"]
+            if hit_sl or hit_tp:
+                exit_price = v["sl"] if hit_sl else v["tp"]
+                self.journal.log_close(symbol, exit_price, result="sl" if hit_sl else "tp",
+                                        pnl=None, dry_run=True)
+                log.info("[%s] [DRY RUN] virtual trade closed: %s", symbol, "SL hit" if hit_sl else "TP hit")
+                del self._virtual_trades[symbol]
+
+        ticket = self._open_tickets.get(symbol)
+        if ticket is not None:
+            if self.mt5.open_positions(symbol=symbol, magic=self.magic):
+                return
+            result = self.mt5.closed_position_result(ticket)
+            if result is not None:
+                exit_price, profit = result
+                self.journal.log_close(symbol, exit_price,
+                                        result="win" if profit > 0 else "loss",
+                                        pnl=profit, dry_run=False)
+                log.info("[%s] position closed: profit=%.2f", symbol, profit)
+                del self._open_tickets[symbol]
 
     def _process_symbol(self, symbol: str, force: bool = False) -> None:
         rates = self.mt5.get_rates(symbol, self.timeframe, self.bars)
@@ -142,6 +181,7 @@ class Agent:
         if self.log_ai_responses:
             log.info("[%s] AI decision: %s", symbol, json.dumps(decision.__dict__))
 
+        self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning)
         self._act_on_decision(symbol, decision, positions)
 
     def _act_on_decision(self, symbol: str, decision: TradeDecision, positions: list) -> None:
@@ -189,6 +229,9 @@ class Agent:
         if self.risk.limits.dry_run:
             log.info("[DRY RUN] Would send %s %s lots=%.2f entry=%.5f sl=%.5f tp=%.5f reason=%s",
                       symbol, decision.action, lots, entry, sl, tp, decision.reasoning)
+            self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
+                                   decision.confidence, decision.reasoning, dry_run=True)
+            self._virtual_trades[symbol] = {"action": decision.action, "entry": entry, "sl": sl, "tp": tp}
             self.risk.state.register_trade()
             return
 
@@ -198,6 +241,11 @@ class Agent:
         )
         log.info("[%s] order_send result: retcode=%s comment=%s", symbol,
                   getattr(result, "retcode", "?"), getattr(result, "comment", "?"))
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
+                                   decision.confidence, decision.reasoning, dry_run=False,
+                                   ticket=result.order)
+            self._open_tickets[symbol] = result.order
         self.risk.state.register_trade()
 
     def _close(self, symbol: str, position) -> None:

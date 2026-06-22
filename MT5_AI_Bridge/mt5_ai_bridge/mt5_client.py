@@ -154,6 +154,18 @@ class MT5Client:
         }
         return mt5.order_send(request)
 
+    def closed_position_result(self, ticket: int):
+        """Returns (exit_price, total_profit) for a closed position, or None if not found yet."""
+        deals = mt5.history_deals_get(position=ticket)
+        if not deals:
+            return None
+        closing_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT]
+        if not closing_deals:
+            return None
+        exit_price = closing_deals[-1].price
+        total_profit = sum(d.profit for d in deals)
+        return exit_price, total_profit
+
     def lots_for_risk(self, symbol: str, risk_percent: float, entry: float, sl: float) -> float:
         info = self.symbol_info(symbol)
         account = self.account_snapshot()

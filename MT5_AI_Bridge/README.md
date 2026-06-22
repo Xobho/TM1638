@@ -58,6 +58,29 @@ Run continuously:
 python run.py
 ```
 
+## Reporting — what's actually working
+
+Every decision the AI makes (including holds) and every trade outcome —
+whether it's a real fill or just a dry-run "would-have" trade — is recorded
+to `logs/trade_journal.jsonl`. `_check_open_trades()` in `agent.py` polls
+the current price each cycle to detect when a virtual (dry-run) or real
+position would have hit its SL/TP, and logs the result; real position
+closes are confirmed against MT5's own deal history
+(`MT5Client.closed_position_result`), not just inferred from price.
+
+Run the report any time, while the bridge keeps running:
+
+```bash
+python report.py
+```
+
+It breaks down: signal distribution (buy/sell/hold counts), win rate and
+average R multiple overall, by symbol, by the AI's own stated confidence
+bucket, and by direction (buy vs. sell) — so you can see, for example,
+whether the AI's "high confidence" calls actually win more than its
+"medium confidence" ones, or whether it's better at one symbol/direction
+than another. Use `--journal <path>` to point at a different journal file.
+
 ## Safety notes — read before setting `dry_run: false`
 
 - **Start in `dry_run: true` and watch the logs** (`logs/bridge.log`) for at
