@@ -12,7 +12,10 @@ import anthropic
 log = logging.getLogger("mt5_ai_bridge.ai_analyst")
 
 SYSTEM_PROMPT = """You are a disciplined trading analyst assisting with a live MetaTrader 5 account.
-You will be given recent OHLC candles for one symbol/timeframe and the current account state.
+You will be given recent OHLC candles for one symbol/timeframe, the current account state, a
+deterministic market-regime classification (trend strength via ADX, volatility level via ATR
+percentile — computed by code, not by you), and a summary of your own recent track record: both
+overall for this symbol, and specifically in the current regime.
 
 Respond with ONLY a single JSON object, no prose, no markdown fences, matching this schema:
 {
@@ -29,6 +32,11 @@ Rules:
 - "close" means close any existing open position on this symbol because the thesis is invalidated.
 - stop_loss and take_profit must be real price levels consistent with the action, or null for hold/close.
 - Be conservative. Low confidence signals should not be acted on by the caller, so be honest about confidence.
+- Use the performance summary as real feedback: if your recent record in the current regime is
+  poor (low win rate, negative average R), raise your bar for what counts as a clear setup and/or
+  lower your confidence in that regime. If a regime has a small sample (low count), don't over-trust
+  it either way. If a regime has a strong positive record, that's not license to force a trade — it
+  only means a genuine setup in those conditions deserves a bit more confidence.
 - Never invent data you were not given.
 """
 
@@ -59,13 +67,16 @@ class AIAnalyst:
         self._model = model
 
     def analyze(self, symbol: str, timeframe: str, candles: list[dict],
-                account: dict, open_position: dict | None) -> TradeDecision:
+                account: dict, open_position: dict | None,
+                regime: dict | None = None, performance: dict | None = None) -> TradeDecision:
         user_payload = {
             "symbol": symbol,
             "timeframe": timeframe,
             "candles": candles,
             "account": account,
             "open_position": open_position,
+            "market_regime": regime,
+            "my_recent_performance": performance,
         }
         message = self._client.messages.create(
             model=self._model,

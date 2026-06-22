@@ -22,19 +22,20 @@ class TradeJournal:
         with self.path.open("a") as f:
             f.write(json.dumps(record) + "\n")
 
-    def log_signal(self, symbol: str, action: str, confidence: float, reasoning: str) -> None:
+    def log_signal(self, symbol: str, action: str, confidence: float, reasoning: str,
+                   regime: str | None = None) -> None:
         self._write({
             "type": "signal", "symbol": symbol, "action": action,
-            "confidence": confidence, "reasoning": reasoning,
+            "confidence": confidence, "reasoning": reasoning, "regime": regime,
         })
 
     def log_open(self, symbol: str, action: str, entry: float, sl: float, tp: float,
                  lots: float, confidence: float, reasoning: str, dry_run: bool,
-                 ticket: int | None = None) -> None:
+                 regime: str | None = None, ticket: int | None = None) -> None:
         self._write({
             "type": "open", "symbol": symbol, "action": action, "entry": entry,
             "sl": sl, "tp": tp, "lots": lots, "confidence": confidence,
-            "reasoning": reasoning, "dry_run": dry_run, "ticket": ticket,
+            "reasoning": reasoning, "dry_run": dry_run, "regime": regime, "ticket": ticket,
         })
 
     def log_close(self, symbol: str, exit_price: float, result: str,

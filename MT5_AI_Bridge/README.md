@@ -84,6 +84,34 @@ back-to-back. This runs on top of, not instead of, the normal once-per-candle
 analysis. Tune `points`/`window_seconds` per symbol — gold needs a much
 larger point threshold than EURUSD to mean the same thing.
 
+## Regime detection and performance memory (real adaptiveness, no fine-tuning)
+
+The AI itself is stateless — each call starts fresh with no memory of past
+decisions and the model's weights are never updated. Real, working
+adaptiveness instead comes from two deterministic pieces that wrap the AI:
+
+1. **`mt5_ai_bridge/regime.py`** computes a market-condition label —
+   `trending`/`ranging` from ADX, `high`/`normal`/`low` from ATR percentile
+   — purely from indicator math, no AI involved. Every signal and trade in
+   the journal gets tagged with the regime active at that moment (e.g.
+   `trending-highvol`).
+2. **`mt5_ai_bridge/performance.py`** pulls rolling win-rate and average-R
+   stats from `trade_journal.jsonl` — both overall for the symbol, and
+   specifically for the *current* regime — and `agent.py` feeds that
+   summary into every single AI call, alongside the candles. The system
+   prompt in `ai_analyst.py` explicitly tells the model to use this as real
+   feedback: tighten up if its recent record in the current regime is poor,
+   don't over-trust a regime with only a handful of trades either way.
+
+This means the AI's judgment each call is genuinely informed by its own
+logged track record under similar conditions, even though there's no
+gradient descent happening — it's feedback via context, not training.
+`report.py`'s "BY MARKET REGIME" section is the same data in human-readable
+form, showing which conditions the AI actually performs well or poorly in
+over time — the basis for eventually deciding which decision logic (AI
+judgment, or a coded rules-based strategy) should be trusted in which
+regime, rather than running one approach blindly in all conditions.
+
 ## Reporting — what's actually working
 
 Every decision the AI makes (including holds) and every trade outcome —

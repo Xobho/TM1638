@@ -14,6 +14,8 @@ from .ai_analyst import AIAnalyst, TradeDecision
 from .config import Config
 from .journal import TradeJournal
 from .mt5_client import MT5Client
+from .performance import rolling_stats
+from .regime import compute_regime
 from .risk import RiskLimits, RiskManager
 
 log = logging.getLogger("mt5_ai_bridge.agent")
@@ -225,6 +227,13 @@ class Agent:
             }
 
         candles = _candles_to_dicts(rates, self.bars)
+        regime = compute_regime(candles)
+        performance = {
+            "overall": rolling_stats(self.journal.path, symbol, regime_label=None, lookback=30),
+            "current_regime": rolling_stats(self.journal.path, symbol,
+                                             regime_label=regime["label"], lookback=30),
+        }
+
         decision = self.analyst.analyze(
             symbol=symbol,
             timeframe=self.timeframe,
@@ -232,15 +241,19 @@ class Agent:
             account={"balance": account.balance, "equity": account.equity,
                      "currency": account.currency},
             open_position=open_position,
+            regime=regime,
+            performance=performance,
         )
 
         if self.log_ai_responses:
-            log.info("[%s] AI decision: %s", symbol, json.dumps(decision.__dict__))
+            log.info("[%s] regime=%s AI decision: %s", symbol, regime["label"], json.dumps(decision.__dict__))
 
-        self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning)
-        self._act_on_decision(symbol, decision, positions)
+        self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning,
+                                 regime=regime["label"])
+        self._act_on_decision(symbol, decision, positions, regime["label"])
 
-    def _act_on_decision(self, symbol: str, decision: TradeDecision, positions: list) -> None:
+    def _act_on_decision(self, symbol: str, decision: TradeDecision, positions: list,
+                          regime_label: str) -> None:
         if decision.action == "hold":
             return
 
@@ -286,7 +299,8 @@ class Agent:
             log.info("[DRY RUN] Would send %s %s lots=%.2f entry=%.5f sl=%.5f tp=%.5f reason=%s",
                       symbol, decision.action, lots, entry, sl, tp, decision.reasoning)
             self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
-                                   decision.confidence, decision.reasoning, dry_run=True)
+                                   decision.confidence, decision.reasoning, dry_run=True,
+                                   regime=regime_label)
             self._virtual_trades[symbol] = {"action": decision.action, "entry": entry, "sl": sl, "tp": tp}
             self.risk.state.register_trade()
             return
@@ -300,7 +314,7 @@ class Agent:
         if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
             self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
                                    decision.confidence, decision.reasoning, dry_run=False,
-                                   ticket=result.order)
+                                   regime=regime_label, ticket=result.order)
             self._open_tickets[symbol] = result.order
         self.risk.state.register_trade()
 

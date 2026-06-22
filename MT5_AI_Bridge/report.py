@@ -10,40 +10,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 from collections import defaultdict
 from pathlib import Path
 
-
-def load_events(path: Path) -> list[dict]:
-    events = []
-    if not path.exists():
-        return events
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                events.append(json.loads(line))
-    return events
-
-
-def build_trades(events: list[dict]) -> list[dict]:
-    """Pairs each open with the next close for the same symbol (one trade at a time per symbol)."""
-    open_by_symbol: dict[str, dict] = {}
-    trades = []
-    for e in events:
-        if e["type"] == "open":
-            open_by_symbol[e["symbol"]] = e
-        elif e["type"] == "close":
-            o = open_by_symbol.pop(e["symbol"], None)
-            if o is None:
-                continue
-            risk = abs(o["entry"] - o["sl"])
-            signed_move = (e["exit"] - o["entry"]) if o["action"] == "buy" else (o["entry"] - e["exit"])
-            r_multiple = signed_move / risk if risk > 0 else 0.0
-            trades.append({**o, "exit": e["exit"], "result": e["result"],
-                           "pnl": e["pnl"], "r_multiple": r_multiple})
-    return trades
+from mt5_ai_bridge.analytics import build_trades, load_events
 
 
 def confidence_bucket(c: float) -> str:
@@ -136,6 +106,18 @@ def main() -> None:
         wr = sum(1 for t in ts if t["r_multiple"] > 0) / len(ts) * 100
         avg = sum(t["r_multiple"] for t in ts) / len(ts)
         print(f"  {direction:6s}: {len(ts)} trades, win rate {wr:.0f}%, avg R {avg:+.2f}")
+
+    print()
+    print("-" * 60)
+    print("BY MARKET REGIME (which conditions does the AI actually do well in?)")
+    print("-" * 60)
+    by_regime: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        by_regime[t.get("regime") or "unknown"].append(t)
+    for regime, ts in sorted(by_regime.items(), key=lambda kv: -sum(t["r_multiple"] for t in kv[1])):
+        wr = sum(1 for t in ts if t["r_multiple"] > 0) / len(ts) * 100
+        avg = sum(t["r_multiple"] for t in ts) / len(ts)
+        print(f"  {regime:18s}: {len(ts)} trades, win rate {wr:.0f}%, avg R {avg:+.2f}")
 
     print()
     print("-" * 60)
