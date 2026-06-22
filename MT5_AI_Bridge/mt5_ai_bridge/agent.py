@@ -82,6 +82,15 @@ class Agent:
         self.poll_seconds: int = t.get("poll_seconds", 60)
         self.magic: int = t.get("magic_number", 990177)
 
+        vt = t.get("volatility_trigger", {})
+        self.vt_enabled: bool = vt.get("enabled", False)
+        self.vt_check_seconds: int = vt.get("check_seconds", 5)
+        self.vt_window_seconds: int = vt.get("window_seconds", 60)
+        self.vt_points: float = vt.get("points", 150)
+        self.vt_cooldown_seconds: int = vt.get("cooldown_seconds", 120)
+        self._tick_history: dict[str, list[tuple[float, float]]] = {}
+        self._last_vt_trigger: dict[str, float] = {}
+
         self.log_ai_responses = config.logging_cfg.get("log_ai_responses", True)
         self._last_bar_time: dict[str, int] = {}
 
@@ -97,15 +106,28 @@ class Agent:
 
     def run_forever(self) -> None:
         self.mt5.connect()
+        last_poll = 0.0
+        sleep_step = min(self.vt_check_seconds, self.poll_seconds) if self.vt_enabled else self.poll_seconds
         try:
             while True:
+                now = time.time()
                 for symbol in self.symbols:
                     try:
                         self._check_open_trades(symbol)
-                        self._process_symbol(symbol)
+                        if self.vt_enabled:
+                            self._check_volatility_trigger(symbol, now)
                     except Exception:
-                        log.exception("Error processing %s", symbol)
-                time.sleep(self.poll_seconds)
+                        log.exception("Error checking %s", symbol)
+
+                if now - last_poll >= self.poll_seconds:
+                    last_poll = now
+                    for symbol in self.symbols:
+                        try:
+                            self._process_symbol(symbol)
+                        except Exception:
+                            log.exception("Error processing %s", symbol)
+
+                time.sleep(sleep_step)
         finally:
             self.mt5.shutdown()
 
@@ -146,6 +168,40 @@ class Agent:
                                         pnl=profit, dry_run=False)
                 log.info("[%s] position closed: profit=%.2f", symbol, profit)
                 del self._open_tickets[symbol]
+
+    def _check_volatility_trigger(self, symbol: str, now: float) -> None:
+        """Fires an immediate, out-of-cycle AI call if price moves abnormally fast.
+
+        Normal analysis only runs once per closed candle, which can miss a
+        fast intra-candle move (e.g. a news spike that sweeps and reverses
+        before the candle closes). This samples price independently of the
+        candle clock and triggers early when it sees a real spike.
+        """
+        tick = self.mt5.get_tick(symbol)
+        price = (tick.bid + tick.ask) / 2.0
+        hist = self._tick_history.setdefault(symbol, [])
+        hist.append((now, price))
+        cutoff = now - self.vt_window_seconds
+        while hist and hist[0][0] < cutoff:
+            hist.pop(0)
+        if len(hist) < 2:
+            return
+
+        info = self.mt5.symbol_info(symbol)
+        if info.point <= 0:
+            return
+        move_points = abs(price - hist[0][1]) / info.point
+
+        last_trigger = self._last_vt_trigger.get(symbol, 0.0)
+        if move_points >= self.vt_points and (now - last_trigger) >= self.vt_cooldown_seconds:
+            log.warning("[%s] Volatility spike: %.1f points in %ds — triggering immediate AI check",
+                        symbol, move_points, self.vt_window_seconds)
+            self._last_vt_trigger[symbol] = now
+            hist.clear()
+            try:
+                self._process_symbol(symbol, force=True)
+            except Exception:
+                log.exception("Error in volatility-triggered analysis for %s", symbol)
 
     def _process_symbol(self, symbol: str, force: bool = False) -> None:
         rates = self.mt5.get_rates(symbol, self.timeframe, self.bars)

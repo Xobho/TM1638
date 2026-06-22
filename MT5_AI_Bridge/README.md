@@ -58,6 +58,32 @@ Run continuously:
 python run.py
 ```
 
+## Volatility-spike trigger (catching fast intra-candle moves)
+
+Normal analysis only runs once per closed candle — fine most of the time,
+but it means a fast, news-driven sweep-and-reverse that fully plays out
+*inside* one candle (common around high-impact news) can resolve before the
+bridge ever looks at it again. `trading.volatility_trigger` in
+`config.yaml` closes that gap:
+
+```yaml
+volatility_trigger:
+  enabled: true
+  check_seconds: 5          # how often to sample price
+  window_seconds: 60        # look-back window for the move
+  points: 150               # min move within that window to count as a spike
+  cooldown_seconds: 120     # min time between two spike-triggered calls
+```
+
+Independently of the candle clock, the bridge samples price every
+`check_seconds` and fires an immediate, out-of-cycle AI call the moment price
+moves more than `points` within `window_seconds` — so a sudden spike gets
+analyzed within seconds instead of waiting for the next candle close. The
+`cooldown_seconds` prevents one sustained move from triggering repeated calls
+back-to-back. This runs on top of, not instead of, the normal once-per-candle
+analysis. Tune `points`/`window_seconds` per symbol — gold needs a much
+larger point threshold than EURUSD to mean the same thing.
+
 ## Reporting — what's actually working
 
 Every decision the AI makes (including holds) and every trade outcome —

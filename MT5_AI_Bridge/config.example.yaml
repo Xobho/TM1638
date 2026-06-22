@@ -21,6 +21,19 @@ trading:
   poll_seconds: 60        # how often to check for a new closed candle
   magic_number: 990177
 
+  # Normal analysis only happens once per closed candle (every poll_seconds
+  # check), which can miss a fast intra-candle move (e.g. a news-driven
+  # sweep-and-reverse that fully plays out before the candle closes). This
+  # samples price every volatility_check_seconds and fires an immediate,
+  # out-of-cycle AI call if price moves more than volatility_points within
+  # volatility_window_seconds — independent of the candle clock.
+  volatility_trigger:
+    enabled: true
+    check_seconds: 5          # how often to sample price for the spike check
+    window_seconds: 60        # look-back window for the move
+    points: 150               # min move (in broker points) within the window to count as a spike
+    cooldown_seconds: 120     # minimum time between two spike-triggered calls for the same symbol
+
 risk:
   # SAFETY: dry_run must be explicitly set to false to ever send a real order.
   dry_run: true
