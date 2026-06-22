@@ -55,6 +55,10 @@ input color  InpColorEntry          = clrGoldenrod;  // Entry line color
 input color  InpColorSL             = clrRed;        // Stop loss line color
 input color  InpColorTP             = clrLimeGreen;  // Take profit line color
 
+input group "=== History ==="
+input int    InpHistoryDays         = 5;             // Scan and draw completed setups from the past N days (0 = off)
+input bool   InpHistoryComputeTPviaFallbackOnly = false; // true = always use fallback RR for historical TP, ignore liquidity target
+
 //--- bookkeeping --------------------------------------------------------
 enum SetupState
   {
@@ -67,6 +71,7 @@ struct Setup
   {
    SetupState state;
    bool       bullish;
+   bool       isHistorical;
    int        setupId;
    double     sweepExtreme;    // price of the liquidity sweep wick
    double     liquidityLevel;  // the swing price that was swept
@@ -102,6 +107,9 @@ int OnInit()
    g_trade.SetExpertMagicNumber(InpMagicNumber);
    if(!g_symbol.Name(_Symbol))
       return INIT_FAILED;
+
+   if(InpShowDrawings && InpHistoryDays > 0)
+      ScanHistory();
 
    return INIT_SUCCEEDED;
   }
@@ -463,6 +471,24 @@ bool FindLiquidityTarget(const MqlRates &r[], int total, bool bullish, double en
   }
 
 //+------------------------------------------------------------------+
+//| bullish FVG: price retraces down into it from above, so the      |
+//| nearest edge is fvgHigh and the deeper/"far" edge (better price,  |
+//| harder fill) is fvgLow. bearish FVG: price retraces up into it    |
+//| from below, so the far edge is fvgHigh.                          |
+//+------------------------------------------------------------------+
+void ComputeEntrySL(bool bullish, double fvgHigh, double fvgLow, double sweepExtreme, double &entry, double &sl)
+  {
+   double point = g_symbol.Point();
+   entry = bullish
+           ? (InpEntryAtMidpoint ? (fvgHigh + fvgLow) / 2.0 : fvgLow)
+           : (InpEntryAtMidpoint ? (fvgHigh + fvgLow) / 2.0 : fvgHigh);
+
+   sl = bullish
+        ? sweepExtreme - InpSweepBufferPoints * point
+        : sweepExtreme + InpSweepBufferPoints * point;
+  }
+
+//+------------------------------------------------------------------+
 void PlacePendingOrder(Setup &s, const MqlRates &rates[], int total)
   {
    if((int)(g_symbol.Spread()) > InpMaxSpreadPoints)
@@ -471,17 +497,8 @@ void PlacePendingOrder(Setup &s, const MqlRates &rates[], int total)
       return;
      }
 
-   double point = g_symbol.Point();
-   // bullish FVG: price retraces down into it from above, so the nearest edge is
-   // fvgHigh and the deeper/"far" edge (better price, harder fill) is fvgLow.
-   // bearish FVG: price retraces up into it from below, so the far edge is fvgHigh.
-   double entry = s.bullish
-                  ? (InpEntryAtMidpoint ? (s.fvgHigh + s.fvgLow) / 2.0 : s.fvgLow)
-                  : (InpEntryAtMidpoint ? (s.fvgHigh + s.fvgLow) / 2.0 : s.fvgHigh);
-
-   double sl = s.bullish
-               ? s.sweepExtreme - InpSweepBufferPoints * point
-               : s.sweepExtreme + InpSweepBufferPoints * point;
+   double entry, sl;
+   ComputeEntrySL(s.bullish, s.fvgHigh, s.fvgLow, s.sweepExtreme, entry, sl);
 
    double slDistance = MathAbs(entry - sl);
    if(slDistance <= 0)
@@ -626,7 +643,7 @@ void ResetSetup(Setup &s, bool wipeDrawings)
 //+------------------------------------------------------------------+
 string SetupPrefix(const Setup &s)
   {
-   return OBJ_PREFIX + (s.bullish ? "BUY_" : "SELL_") + IntegerToString(s.setupId) + "_";
+   return OBJ_PREFIX + (s.isHistorical ? "HIST_" : "") + (s.bullish ? "BUY_" : "SELL_") + IntegerToString(s.setupId) + "_";
   }
 
 void DeleteObjectsByPrefix(string prefix)
@@ -709,24 +726,26 @@ void DrawFVG(const Setup &s)
    ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
   }
 
-void DrawTradeLevels(const Setup &s, double entry, double sl, double tp)
+void DrawTradeLevels(const Setup &s, double entry, double sl, double tp, datetime endTimeOverride = 0, bool rayRight = true)
   {
    string pfx = SetupPrefix(s);
    datetime t1 = s.mssTime;
-   datetime t2 = TimeCurrent() + PeriodSeconds(InpLTF_Timeframe) * (InpPendingExpiryBars + 10);
+   datetime t2 = (endTimeOverride != 0)
+                 ? endTimeOverride
+                 : TimeCurrent() + PeriodSeconds(InpLTF_Timeframe) * (InpPendingExpiryBars + 10);
 
-   DrawLevelLine(pfx + "Entry", t1, t2, entry, InpColorEntry, STYLE_DASH, "Entry");
-   DrawLevelLine(pfx + "SL",    t1, t2, sl,    InpColorSL,    STYLE_SOLID, "SL");
-   DrawLevelLine(pfx + "TP",    t1, t2, tp,    InpColorTP,    STYLE_SOLID, "TP");
+   DrawLevelLine(pfx + "Entry", t1, t2, entry, InpColorEntry, STYLE_DASH, "Entry", rayRight);
+   DrawLevelLine(pfx + "SL",    t1, t2, sl,    InpColorSL,    STYLE_SOLID, "SL", rayRight);
+   DrawLevelLine(pfx + "TP",    t1, t2, tp,    InpColorTP,    STYLE_SOLID, "TP", rayRight);
   }
 
-void DrawLevelLine(string name, datetime t1, datetime t2, double price, color col, ENUM_LINE_STYLE style, string tag)
+void DrawLevelLine(string name, datetime t1, datetime t2, double price, color col, ENUM_LINE_STYLE style, string tag, bool rayRight = true)
   {
    ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price);
    ObjectSetInteger(0, name, OBJPROP_COLOR, col);
    ObjectSetInteger(0, name, OBJPROP_STYLE, style);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, rayRight);
 
    string labelName = name + "Label";
    ObjectCreate(0, labelName, OBJ_TEXT, 0, t2, price);
@@ -752,6 +771,182 @@ void UpdateStatusComment(bool bullBiasAllowed, bool bearBiasAllowed)
    string txt = "=== MMBM Liquidity Sweep EA ===\n";
    txt += "Bullish setup [" + (bullBiasAllowed ? "active" : "blocked by HTF bias") + "]: " + StateToString(g_bull.state) + "\n";
    txt += "Bearish setup [" + (bearBiasAllowed ? "active" : "blocked by HTF bias") + "]: " + StateToString(g_bear.state) + "\n";
+   if(InpHistoryDays > 0)
+      txt += "(History: last " + IntegerToString(InpHistoryDays) + " day(s) of completed setups drawn on chart)\n";
    Comment(txt);
+  }
+
+//+------------------------------------------------------------------+
+//| One-shot historical scan: walks the past InpHistoryDays of LTF    |
+//| bars chronologically and draws every complete sweep -> MSS -> FVG |
+//| sequence found, exactly like the live state machine would have,   |
+//| but without placing any orders. Runs once on EA init (and again  |
+//| automatically whenever an input is changed, since that re-fires   |
+//| OnInit).                                                          |
+//+------------------------------------------------------------------+
+void ScanHistory()
+  {
+   datetime fromTime = TimeCurrent() - (long)InpHistoryDays * 86400;
+
+   MqlRates hr[];
+   ArraySetAsSeries(hr, false); // ascending: index 0 = oldest
+   int n = CopyRates(_Symbol, InpLTF_Timeframe, fromTime, TimeCurrent(), hr);
+
+   int k = InpSwingLeftRight;
+   if(n < 2 * k + 10)
+      return;
+
+   ScanHistoryDirection(hr, n, true);
+   ScanHistoryDirection(hr, n, false);
+  }
+
+void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
+  {
+   int k = InpSwingLeftRight;
+
+   for(int i = k; i < n - k; i++)
+     {
+      bool isSwing = bullish ? IsSwingLow(hr, i, k) : IsSwingHigh(hr, i, k);
+      if(!isSwing)
+         continue;
+      double level = bullish ? hr[i].low : hr[i].high;
+
+      // forward search for the sweep candle
+      int sweepIdx = -1; double sweepPrice = 0;
+      for(int j = i + k + 1; j < n && j <= i + k + 1 + InpMaxBarsAfterSweep; j++)
+        {
+         if(bullish && hr[j].low < level && hr[j].close > level)  { sweepIdx = j; sweepPrice = hr[j].low;  break; }
+         if(!bullish && hr[j].high > level && hr[j].close < level) { sweepIdx = j; sweepPrice = hr[j].high; break; }
+        }
+      if(sweepIdx < 0)
+         continue;
+
+      // forward search for the opposing minor swing (the MSS reference level)
+      double refLevel = 0; int refIdx = -1;
+      for(int m = sweepIdx + k; m < n - k && m <= sweepIdx + InpMaxBarsAfterSweep; m++)
+        {
+         if(bullish && IsSwingHigh(hr, m, k))  { refLevel = hr[m].high; refIdx = m; break; }
+         if(!bullish && IsSwingLow(hr, m, k))  { refLevel = hr[m].low;  refIdx = m; break; }
+        }
+      if(refIdx < 0)
+         continue;
+
+      // forward search for the MSS confirmation (close beyond refLevel)
+      int mssIdx = -1;
+      for(int j = refIdx + 1; j < n && j <= sweepIdx + InpMaxBarsAfterSweep; j++)
+        {
+         if(bullish && hr[j].close > refLevel)  { mssIdx = j; break; }
+         if(!bullish && hr[j].close < refLevel) { mssIdx = j; break; }
+        }
+      if(mssIdx < 0)
+         continue;
+
+      // search the impulse leg (sweepIdx..mssIdx) for the entry FVG, nearest to mssIdx first
+      double fvgHigh = 0, fvgLow = 0;
+      if(!FindEntryFVGAscending(hr, n, sweepIdx, mssIdx, bullish, fvgHigh, fvgLow))
+         continue;
+
+      Setup hs;
+      ZeroMemory(hs);
+      hs.bullish        = bullish;
+      hs.isHistorical    = true;
+      hs.setupId         = ++g_setupCounter;
+      hs.sweepTime       = hr[sweepIdx].time;
+      hs.sweepExtreme    = sweepPrice;
+      hs.liquidityLevel  = level;
+      hs.mssTime         = hr[mssIdx].time;
+      hs.mssLevel        = refLevel;
+      hs.fvgHigh         = fvgHigh;
+      hs.fvgLow          = fvgLow;
+
+      DrawSweep(hs);
+      DrawMSS(hs);
+      DrawFVG(hs);
+
+      double entry, sl;
+      ComputeEntrySL(bullish, fvgHigh, fvgLow, sweepPrice, entry, sl);
+      double slDistance = MathAbs(entry - sl);
+      if(slDistance > 0)
+        {
+         double target, tp;
+         if(!InpHistoryComputeTPviaFallbackOnly && FindLiquidityTargetAscending(hr, n, bullish, entry, mssIdx, target))
+            tp = target;
+         else
+            tp = bullish ? entry + slDistance * InpFallbackRR : entry - slDistance * InpFallbackRR;
+
+         datetime endTime = hr[mssIdx].time + PeriodSeconds(InpLTF_Timeframe) * (InpPendingExpiryBars + 10);
+         DrawTradeLevels(hs, entry, sl, tp, endTime, false);
+        }
+
+      // resume scanning after this setup's MSS bar so overlapping duplicates aren't found
+      i = mssIdx;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Same 3-candle FVG search as FindEntryFVG, but for an ascending    |
+//| (oldest-first) historical array.                                  |
+//+------------------------------------------------------------------+
+bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow)
+  {
+   double point = g_symbol.Point();
+   double minSize = InpMinFVGSizePoints * point;
+
+   int searchFrom = MathMax(sweepIdx, mssIdx - InpMaxBarsForFVGSearch);
+
+   // scan from the bar closest to "now" (mssIdx) backward toward the sweep
+   for(int i = mssIdx - 1; i > searchFrom; i--)
+     {
+      if(i - 1 < 0 || i + 1 >= n)
+         continue;
+
+      if(bullish)
+        {
+         double gapLow  = r[i + 1].low;
+         double gapHigh = r[i - 1].high;
+         if(gapLow > gapHigh && (gapLow - gapHigh) >= minSize)
+           {
+            fvgLow  = gapHigh;
+            fvgHigh = gapLow;
+            return true;
+           }
+        }
+      else
+        {
+         double gapHigh = r[i + 1].high;
+         double gapLow  = r[i - 1].low;
+         if(gapLow > gapHigh && (gapLow - gapHigh) >= minSize)
+           {
+            fvgLow  = gapHigh;
+            fvgHigh = gapLow;
+            return true;
+           }
+        }
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Same liquidity-target search as FindLiquidityTarget, but searches |
+//| forward through the ascending historical array starting after the |
+//| MSS bar.                                                          |
+//+------------------------------------------------------------------+
+bool FindLiquidityTargetAscending(const MqlRates &r[], int n, bool bullish, double entryPrice, int fromIdx, double &target)
+  {
+   int k = InpSwingLeftRight;
+   for(int i = fromIdx; i < n - k; i++)
+     {
+      if(bullish && IsSwingHigh(r, i, k) && r[i].high > entryPrice)
+        {
+         target = r[i].high;
+         return true;
+        }
+      if(!bullish && IsSwingLow(r, i, k) && r[i].low < entryPrice)
+        {
+         target = r[i].low;
+         return true;
+        }
+     }
+   return false;
   }
 //+------------------------------------------------------------------+

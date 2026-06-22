@@ -59,6 +59,31 @@ review. A one-line live status (`InpShowStatusComment`) is also shown via
 `Comment()` in the chart's top-left corner indicating each direction's
 current stage (idle / waiting for MSS / pending order placed).
 
+## Seeing history
+
+By default the EA only draws a setup once it actually happens live, going
+forward from the moment it's attached — it won't retroactively show what
+happened before that. To see the last few days of completed setups
+immediately:
+
+- Set `InpHistoryDays` (default 5) to however many days back you want
+  scanned. `0` disables it.
+- The scan runs once, automatically, in `OnInit` — i.e. the moment you
+  attach the EA, or any time you open its Inputs dialog and click OK (MT5
+  re-runs `OnInit` whenever inputs change, so tweaking `InpHistoryDays` and
+  hitting OK re-scans immediately without removing/re-adding the EA).
+- Historical setups are drawn with every stage — sweep, MSS, FVG, and the
+  entry/SL/TP it *would have* taken — using the exact same detection logic
+  as the live state machine, just walked forward through past bars instead
+  of bar-by-bar in real time. Their entry/SL/TP lines are bounded to a fixed
+  window after the setup (they don't ray out to the current bar) so they
+  don't visually clash with live ones.
+- Historical objects are named `MMBM_HIST_<BUY|SELL>_<id>_...` (vs.
+  `MMBM_<BUY|SELL>_<id>_...` for live ones), so the two sets never collide
+  and `InpDeleteObjectsOnRemove` clears both.
+- Historical setups are **not** filtered by HTF bias and never place real
+  orders — they're for visual review only.
+
 ## Key inputs
 
 | Input | Purpose |
@@ -73,6 +98,7 @@ current stage (idle / waiting for MSS / pending order placed).
 | `InpShowDrawings` | Master toggle for all chart objects |
 | `InpClearInvalidatedSteps` | Auto-remove drawings for setups that never filled |
 | `InpDeleteObjectsOnRemove` | Wipe all EA drawings when removed from the chart |
+| `InpHistoryDays` | Days of history to scan and draw on init (0 = off) |
 
 ## Notes / disclaimer
 
