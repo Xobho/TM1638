@@ -215,6 +215,7 @@ class Agent:
 
         account = self.mt5.account_snapshot()
         positions = self.mt5.open_positions(symbol=symbol, magic=self.magic)
+        virtual = self._virtual_trades.get(symbol)
         open_position = None
         if positions:
             p = positions[0]
@@ -225,6 +226,17 @@ class Agent:
                 "sl": p.sl,
                 "tp": p.tp,
                 "profit": p.profit,
+            }
+        elif virtual is not None:
+            # Dry run: no real position exists, but a virtual one is open — tell
+            # the AI so it doesn't act as if flat (mirrors live one-trade-per-symbol).
+            open_position = {
+                "type": virtual["action"],
+                "volume": virtual["lots"],
+                "price_open": virtual["entry"],
+                "sl": virtual["sl"],
+                "tp": virtual["tp"],
+                "profit": None,
             }
 
         candles = candles_to_dicts(rates, self.bars)
@@ -253,7 +265,7 @@ class Agent:
 
         self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning,
                                  regime=regime["label"], strategy=decision.strategy)
-        self._act_on_decision(symbol, decision, positions, regime["label"])
+        self._act_on_decision(symbol, decision, positions, virtual, regime["label"])
 
     def _compute_ict(self, symbol: str, candles: list[dict]) -> dict | None:
         """Deterministic ICT/SMC structure (same logic as the MQL5 EA) fed to the
@@ -272,18 +284,23 @@ class Agent:
             return None
 
     def _act_on_decision(self, symbol: str, decision: TradeDecision, positions: list,
-                          regime_label: str) -> None:
+                          virtual: dict | None, regime_label: str) -> None:
         if decision.action == "hold":
             return
 
         if decision.action == "close":
-            if not positions:
-                return
-            for p in positions:
-                self._close(symbol, p)
+            if positions:
+                for p in positions:
+                    self._close(symbol, p)
+            elif virtual is not None:
+                tick = self.mt5.get_tick(symbol)
+                exit_price = tick.bid if virtual["action"] == "buy" else tick.ask
+                log.info("[%s] [DRY RUN] Would close virtual trade on AI 'close' signal", symbol)
+                self.journal.log_close(symbol, exit_price, result="closed", pnl=None, dry_run=True)
+                del self._virtual_trades[symbol]
             return
 
-        if positions:
+        if positions or virtual is not None:
             log.info("[%s] AI said %s but a position is already open under this magic number — skipping",
                       symbol, decision.action)
             return
@@ -294,9 +311,11 @@ class Agent:
             return
 
         spread = self.mt5.spread_points(symbol)
+        open_count = len(self._virtual_trades) if self.risk.limits.dry_run \
+            else len(self.mt5.open_positions(magic=self.magic))
         ok, reason = self.risk.can_open_new_trade(
             confidence=decision.confidence,
-            open_position_count=len(self.mt5.open_positions(magic=self.magic)),
+            open_position_count=open_count,
             spread_points=spread,
         )
         if not ok:
@@ -320,7 +339,8 @@ class Agent:
             self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
                                    decision.confidence, decision.reasoning, dry_run=True,
                                    regime=regime_label, strategy=decision.strategy)
-            self._virtual_trades[symbol] = {"action": decision.action, "entry": entry, "sl": sl, "tp": tp}
+            self._virtual_trades[symbol] = {"action": decision.action, "entry": entry, "sl": sl,
+                                             "tp": tp, "lots": lots}
             self.risk.state.register_trade()
             return
 
