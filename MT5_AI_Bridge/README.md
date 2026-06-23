@@ -88,30 +88,56 @@ larger point threshold than EURUSD to mean the same thing.
 
 The AI sees raw OHLC numbers, not a chart. Asking it to spot a liquidity
 sweep, structure shift, or fair value gap by eyeballing 200 rows of numbers
-every call is unreliable — so it tends to default to `hold`. Meanwhile the
-MQL5 `MMBM_LiquiditySweep_EA` already detects all of that *deterministically*
-in code. `mt5_ai_bridge/ict.py` ports that exact logic to Python so the
-bridge computes the same structure and hands it to the AI as an `ict` feature
-block alongside the candles:
+every call is unreliable — so it tends to default to `hold`. Code is good at
+exactly that mechanical pattern-spotting, so `mt5_ai_bridge/ict.py` runs a
+*suite* of deterministic ICT/SMC strategy detectors every call and hands the
+results to the AI as an `ict` feature block alongside the candles.
+
+**Six strategies are evaluated each candle, in both directions:**
+
+| `strategy` | What it detects |
+|---|---|
+| `liquidity_sweep_mss` | Sweep of swing liquidity → market-structure shift → fair-value-gap entry (the original MQL5 EA model). Reversal. |
+| `order_block` | The last opposing candle before a break of structure; entry on the retrace into that order block. |
+| `fair_value_gap` | A standalone unfilled 3-candle imbalance; entry on the retrace into the gap. |
+| `breaker_block` | An order block that failed and flipped (price swept it and shifted structure the other way); entry on the retest. |
+| `turtle_soup` | A false breakout of the prior N-bar range extreme that closes back inside (a liquidity grab); reversal. |
+| `optimal_trade_entry` | The 0.62–0.79 fib retracement zone of the most recent impulse leg (ICT "OTE"). |
+
+Each call's `ict` block contains:
 
 - **`htf_bias`** — higher-timeframe directional bias (HH/HL → bullish,
   LH/LL → bearish, mixed → neutral), from `trading.htf_timeframe` (default H4).
 - **`context`** — the recent dealing range: `price_zone`
-  (premium/discount/equilibrium — a core ICT concept the EA doesn't expose),
-  plus the nearest swing high/low (liquidity pools price may draw toward).
-- **`bullish_setup` / `bearish_setup`** — each null if nothing's forming, else
-  a `stage`: `sweep_only`, `mss_confirmed`, or `ready` (sweep + MSS + FVG, with
-  `suggested_entry` / `suggested_sl` / `suggested_tp` / `rr` — the levels the
-  EA would trade).
+  (premium/discount/equilibrium), the nearest swing high/low, and any
+  `equal_highs`/`equal_lows` (resting liquidity pools price may draw toward).
+- **`setups`** — a list of every setup the detectors currently see (both
+  directions, all strategies). Each entry is tagged with its `strategy`,
+  `direction`, and a `stage`: `ready` (price is at the point of interest now,
+  actionable on a market order) or `forming` (valid structure, but price must
+  still retrace into the zone). `liquidity_sweep_mss` reports its own
+  progression — `sweep_only` → `mss_confirmed` → `ready`. Actionable
+  (`ready`) setups are sorted to the front; each carries `suggested_entry` /
+  `suggested_sl` / `suggested_tp` / `rr`.
 
-Crucially, **the AI is not forced to take these setups.** The system prompt
-frames `ict` as a second set of eyes: it can act on a clear setup the detector
-flagged, decline or fade a `ready` setup when regime / premium-discount / HTF
-bias / its own track record argue against it, or act on something the detector
-didn't catch. Since the bridge fills with market orders, it's told to only act
-on a detected setup when price is already at/near the suggested entry POI,
-otherwise wait for the retracement. Tune the detector under `trading.ict` in
-`config.yaml` (swing size, min FVG size, stop buffer, HTF bias on/off).
+**Which strategy did the AI actually use?** The AI's JSON response includes a
+`strategy` field — the name of the detected setup it traded, `discretionary`
+if it acted on its own read of the candles, or `null` for hold/close. That's
+written to the journal on every signal and trade, so `report.py`'s
+**BY ICT STRATEGY** section shows win rate and average R *per strategy* —
+the whole point of running several at once is to learn from live data which
+ones actually work, for this symbol, in which regime.
+
+Crucially, **the AI is not forced to take any of these setups.** The system
+prompt frames `setups` as several sets of eyes: multiple (even conflicting)
+setups can be present at once, and it's the AI's job to judge which — if any —
+deserves a trade given HTF bias, premium/discount location, regime, and its own
+track record. It can fade a `ready` setup, or trade something none of the
+detectors caught (`strategy: "discretionary"`). Since the bridge fills with
+market orders, it's told to only act on a detected setup when price is already
+at/near that setup's suggested entry, otherwise wait for the retracement. Tune
+the detectors under `trading.ict` in `config.yaml` (swing size, min FVG size,
+stop/zone buffer, HTF bias on/off).
 
 ## Regime detection and performance memory (real adaptiveness, no fine-tuning)
 
@@ -222,7 +248,7 @@ than another. Use `--journal <path>` to point at a different journal file.
 | `mt5_ai_bridge/mt5_client.py` | MT5 terminal connection, rates/positions/orders |
 | `mt5_ai_bridge/ai_analyst.py` | Builds the prompt, calls Claude, parses the JSON decision |
 | `mt5_ai_bridge/risk.py` | All trade-approval guardrails in one place |
-| `mt5_ai_bridge/ict.py` | Deterministic ICT/SMC detection (sweep/MSS/FVG/bias/premium-discount), ported from the MQL5 EA |
+| `mt5_ai_bridge/ict.py` | Suite of deterministic ICT/SMC strategy detectors (sweep/MSS/FVG, order block, FVG, breaker, turtle soup, OTE) + bias/premium-discount context |
 | `mt5_ai_bridge/agent.py` | Main loop tying the above together |
 | `backtest.py` | Walk-forward backtest against historical candles, with a cost estimate gate before any API spend |
 

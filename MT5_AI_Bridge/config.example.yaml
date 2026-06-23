@@ -23,17 +23,21 @@ trading:
 
   htf_timeframe: "H4"       # higher timeframe used for ICT directional bias
 
-  # Deterministic ICT/SMC structure detection (same liquidity-sweep / MSS / FVG
-  # logic as the MQL5 EA), computed by code and fed to the AI as features so it
-  # doesn't have to re-derive structure from raw candles. The AI is NOT forced
-  # to take these setups — they're a second set of eyes alongside its own read.
+  # Deterministic ICT/SMC structure detection, computed by code and fed to the
+  # AI as features so it doesn't have to re-derive structure from raw candles.
+  # A SUITE of strategies is evaluated every candle (both directions):
+  # liquidity_sweep_mss, order_block, fair_value_gap, breaker_block,
+  # turtle_soup, optimal_trade_entry. Each detected setup is tagged with its
+  # strategy name; the AI reports which one it acted on, and report.py breaks
+  # results down "BY ICT STRATEGY". The AI is NOT forced to take any of them —
+  # they're several sets of eyes alongside its own read.
   ict:
     enabled: true
     htf_bars: 300             # bars pulled on htf_timeframe for the bias check
     swing_left_right: 3       # bars each side required to confirm a swing point
     min_fvg_points: 30        # minimum fair-value-gap size (broker points) to be tradable
-    sweep_buffer_points: 20   # buffer beyond the sweep extreme for the suggested stop
-    entry_at_midpoint: true   # suggested entry at 50% of the FVG (false = far edge)
+    sweep_buffer_points: 20   # stop buffer + zone tolerance (broker points) for all strategies
+    entry_at_midpoint: true   # liquidity_sweep_mss entry at 50% of the FVG (false = far edge)
     require_htf_bias: true    # only surface setups aligned with HTF structure
 
   # Normal analysis only happens once per closed candle (every poll_seconds

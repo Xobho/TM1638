@@ -18,16 +18,26 @@ deterministic market-regime classification (trend strength via ADX, volatility l
 percentile — computed by code, not by you); a summary of your own recent track record (overall for
 this symbol and specifically in the current regime); and a deterministic ICT/SMC structure read.
 
-The "ict" object is computed by code (the same liquidity-sweep / market-structure-shift / fair-value-gap
-logic an existing Expert Advisor uses), so you don't have to re-derive that structure from raw candles:
+The "ict" object is computed by code (the same family of structure-detection logic an Expert Advisor
+uses), so you don't have to re-derive structure from raw candles:
 - "htf_bias": higher-timeframe directional bias ("bullish" / "bearish" / "neutral").
 - "context": the recent dealing range — "price_zone" (premium = upper third, favor sells; discount =
-  lower third, favor buys; equilibrium = middle), plus the nearest swing high/low (liquidity pools
-  price may draw toward).
-- "bullish_setup"/"bearish_setup": each is null if nothing is forming, else has a "stage":
-  "sweep_only" (liquidity swept, no confirmation yet), "mss_confirmed" (structure shift confirmed),
-  or "ready" (sweep + MSS + a fair value gap, with "suggested_entry", "suggested_sl", "suggested_tp",
-  "rr" — the levels the EA would trade).
+  lower third, favor buys; equilibrium = middle), the nearest swing high/low, and any "equal_highs"/
+  "equal_lows" (resting liquidity pools price may draw toward).
+- "setups": a list of every ICT setup currently detected, across BOTH directions and SEVERAL
+  strategies. Each entry has a "strategy", a "direction" ("bullish"/"bearish"), a "stage", and (when
+  actionable) "suggested_entry" / "suggested_sl" / "suggested_tp" / "rr" plus the relevant zone.
+  The strategies are:
+    - "liquidity_sweep_mss": sweep of liquidity -> market-structure shift -> fair-value-gap entry.
+      Its stage progresses "sweep_only" -> "mss_confirmed" -> "ready".
+    - "order_block": last opposing candle before a break of structure; entry on the retrace into it.
+    - "fair_value_gap": a standalone unfilled 3-candle imbalance; entry on the retrace into the gap.
+    - "breaker_block": an order block that failed and flipped; entry on the retest.
+    - "turtle_soup": a false breakout of the prior range extreme that closed back inside (reversal).
+    - "optimal_trade_entry": the 0.62-0.79 fib retracement zone of the most recent impulse leg.
+  For the zone strategies, stage "ready" means price is AT the point of interest now (actionable on a
+  market order); "forming" means the structure is valid but price must still retrace into the zone.
+  An empty "setups" list means code found no clean structure this candle.
 
 Respond with ONLY a single JSON object, no prose, no markdown fences, matching this schema:
 {
@@ -35,17 +45,21 @@ Respond with ONLY a single JSON object, no prose, no markdown fences, matching t
   "confidence": number between 0 and 1,
   "stop_loss": number or null,
   "take_profit": number or null,
+  "strategy": one of the strategy names above if you acted on a detected setup, "discretionary" if you
+              acted on your own read of the candles, or null for hold/close,
   "reasoning": "short string, max 2 sentences"
 }
 
 Rules:
-- The ict read is a strong, structured input — but you are NOT limited to it and NOT required to take
-  every "ready" setup. Treat it as a second set of eyes: it tells you what known ICT structure code
-  detected. You may also act on a clear setup you see in the candles that it didn't flag, and you may
-  decline or fade a "ready" setup when the regime, premium/discount location, HTF bias, or your own
-  track record argue against it. When you do take a detected setup, a market order fills at current
-  price — so only act now if price is already at or near the suggested_entry / point of interest;
-  otherwise hold and wait for the retracement. You may use the suggested_sl / suggested_tp or your own.
+- The "setups" list is a strong, structured input — but you are NOT limited to it and NOT required to
+  take every "ready" setup. Treat it as several sets of eyes: it tells you what known ICT structures
+  code detected right now. Multiple setups can be present at once (even conflicting long/short ones);
+  it is your job to judge which, if any, deserves a trade given htf_bias, premium/discount location,
+  regime, and your own track record. You may also act on a clear setup in the candles that none of the
+  detectors flagged (set "strategy": "discretionary"), and you may decline or fade a "ready" setup.
+  When you act on a detected setup, a market order fills at current price — so only act now if price is
+  at/near that setup's suggested_entry / zone; otherwise hold and wait for the retracement. You may use
+  the setup's suggested_sl / suggested_tp or your own. Always set "strategy" to whatever you acted on.
 - Only output "buy" or "sell" when you see a clear, well-defined setup. Default to "hold" when uncertain.
 - "close" means close any existing open position on this symbol because the thesis is invalidated.
 - stop_loss and take_profit must be real price levels consistent with the action, or null for hold/close.
@@ -66,11 +80,12 @@ class TradeDecision:
     stop_loss: float | None
     take_profit: float | None
     reasoning: str
+    strategy: str | None = None
 
     @staticmethod
     def hold(reason: str) -> "TradeDecision":
         return TradeDecision(action="hold", confidence=0.0, stop_loss=None,
-                              take_profit=None, reasoning=reason)
+                              take_profit=None, reasoning=reason, strategy=None)
 
 
 class AIAnalyst:
@@ -140,12 +155,15 @@ class AIAnalyst:
             action = str(data.get("action", "hold")).lower()
             if action not in ("buy", "sell", "close", "hold"):
                 action = "hold"
+            strategy = data.get("strategy")
+            strategy = str(strategy) if strategy not in (None, "") else None
             return TradeDecision(
                 action=action,
                 confidence=float(data.get("confidence", 0.0)),
                 stop_loss=data.get("stop_loss"),
                 take_profit=data.get("take_profit"),
                 reasoning=str(data.get("reasoning", "")),
+                strategy=strategy,
             )
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             log.warning("Could not parse AI response as JSON (%s): %s", exc, text[:300])

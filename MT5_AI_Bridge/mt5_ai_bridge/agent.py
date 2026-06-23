@@ -252,7 +252,7 @@ class Agent:
             log.info("[%s] regime=%s AI decision: %s", symbol, regime["label"], json.dumps(decision.__dict__))
 
         self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning,
-                                 regime=regime["label"])
+                                 regime=regime["label"], strategy=decision.strategy)
         self._act_on_decision(symbol, decision, positions, regime["label"])
 
     def _compute_ict(self, symbol: str, candles: list[dict]) -> dict | None:
@@ -319,7 +319,7 @@ class Agent:
                       symbol, decision.action, lots, entry, sl, tp, decision.reasoning)
             self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
                                    decision.confidence, decision.reasoning, dry_run=True,
-                                   regime=regime_label)
+                                   regime=regime_label, strategy=decision.strategy)
             self._virtual_trades[symbol] = {"action": decision.action, "entry": entry, "sl": sl, "tp": tp}
             self.risk.state.register_trade()
             return
@@ -333,7 +333,7 @@ class Agent:
         if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
             self.journal.log_open(symbol, decision.action, entry, sl, tp, lots,
                                    decision.confidence, decision.reasoning, dry_run=False,
-                                   regime=regime_label, ticket=result.order)
+                                   regime=regime_label, ticket=result.order, strategy=decision.strategy)
             self._open_tickets[symbol] = result.order
         self.risk.state.register_trade()
 

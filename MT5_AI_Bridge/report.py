@@ -109,6 +109,18 @@ def main() -> None:
 
     print()
     print("-" * 60)
+    print("BY ICT STRATEGY (which detected setup did the AI actually trade?)")
+    print("-" * 60)
+    by_strat: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        by_strat[t.get("strategy") or "unspecified"].append(t)
+    for strat, ts in sorted(by_strat.items(), key=lambda kv: -sum(t["r_multiple"] for t in kv[1])):
+        wr = sum(1 for t in ts if t["r_multiple"] > 0) / len(ts) * 100
+        avg = sum(t["r_multiple"] for t in ts) / len(ts)
+        print(f"  {strat:22s}: {len(ts)} trades, win rate {wr:.0f}%, avg R {avg:+.2f}")
+
+    print()
+    print("-" * 60)
     print("BY MARKET REGIME (which conditions does the AI actually do well in?)")
     print("-" * 60)
     by_regime: dict[str, list[dict]] = defaultdict(list)
@@ -125,8 +137,8 @@ def main() -> None:
     print("-" * 60)
     for t in trades[-10:]:
         print(f"  {t['symbol']:8s} {t['action']:4s} conf={t['confidence']:.2f} "
-              f"R={t['r_multiple']:+.2f} {'(dry run)' if t['dry_run'] else '(live)'} "
-              f"- {t['reasoning'][:60]}")
+              f"R={t['r_multiple']:+.2f} [{t.get('strategy') or 'unspecified'}] "
+              f"{'(dry run)' if t['dry_run'] else '(live)'} - {t['reasoning'][:50]}")
 
 
 if __name__ == "__main__":

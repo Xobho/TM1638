@@ -173,7 +173,7 @@ def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: Tra
             regime=regime, performance=performance, ict=ict,
         )
         journal.log_signal(args.symbol, decision.action, decision.confidence,
-                            decision.reasoning, regime=regime["label"])
+                            decision.reasoning, regime=regime["label"], strategy=decision.strategy)
 
         if decision.action in ("hold", "close"):
             continue
@@ -192,7 +192,7 @@ def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: Tra
 
         journal.log_open(args.symbol, decision.action, entry, sl, tp, lots=0.0,
                           confidence=decision.confidence, reasoning=decision.reasoning,
-                          dry_run=True, regime=regime["label"])
+                          dry_run=True, regime=regime["label"], strategy=decision.strategy)
         open_trade = {"entry": entry, "sl": sl, "tp": tp, "is_buy": is_buy}
 
     trades = build_trades(load_events(str(journal.path)))
