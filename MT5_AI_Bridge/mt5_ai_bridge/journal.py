@@ -47,3 +47,11 @@ class TradeJournal:
             "type": "close", "symbol": symbol, "exit": exit_price,
             "result": result, "pnl": pnl, "dry_run": dry_run,
         })
+
+    def log_rejected(self, symbol: str, action: str, confidence: float, reason: str,
+                     regime: str | None = None, strategy: str | None = None) -> None:
+        self._write({
+            "type": "rejected", "symbol": symbol, "action": action,
+            "confidence": confidence, "reason": reason, "regime": regime,
+            "strategy": strategy,
+        })

@@ -320,6 +320,8 @@ class Agent:
         )
         if not ok:
             log.info("[%s] Signal %s rejected by risk manager: %s", symbol, decision.action, reason)
+            self.journal.log_rejected(symbol, decision.action, decision.confidence, reason,
+                                       regime=regime_label, strategy=decision.strategy)
             return
 
         tick = self.mt5.get_tick(symbol)

@@ -47,6 +47,19 @@ def main() -> None:
         print(f"  {action:6s}: {count}")
     print(f"  total signals: {len(signals)}")
 
+    rejected = [e for e in events if e["type"] == "rejected"]
+    if rejected:
+        print()
+        print("-" * 60)
+        print("REJECTED SIGNALS (passed AI's hold/close filter, blocked by risk manager)")
+        print("-" * 60)
+        by_reason = defaultdict(int)
+        for r in rejected:
+            by_reason[r["reason"]] += 1
+        for reason, count in sorted(by_reason.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:3d}x  {reason}")
+        print(f"  total rejected: {len(rejected)}")
+
     if not trades:
         print("\nNo completed trades yet (no open+close pair in the journal). Let it run longer.")
         return
