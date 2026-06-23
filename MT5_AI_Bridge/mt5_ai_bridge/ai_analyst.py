@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 import anthropic
@@ -56,15 +57,19 @@ class TradeDecision:
 
 
 class AIAnalyst:
-    def __init__(self, api_key_env: str, model: str):
+    def __init__(self, api_key_env: str, model: str, max_retries: int = 4):
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(
                 f"Environment variable {api_key_env} is not set. "
                 "Export your Anthropic API key before running the bridge."
             )
+        # The SDK retries transient errors on its own; we add an outer backoff
+        # loop on top for 529 (overloaded) / 429 (rate limit) which can persist
+        # longer than the SDK's default budget during API-wide load spikes.
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
+        self._max_retries = max_retries
 
     def analyze(self, symbol: str, timeframe: str, candles: list[dict],
                 account: dict, open_position: dict | None,
@@ -78,17 +83,31 @@ class AIAnalyst:
             "market_regime": regime,
             "my_recent_performance": performance,
         }
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=700,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": json.dumps(user_payload)}],
-        )
+        message = self._create_with_backoff(user_payload, symbol)
         text = "".join(block.text for block in message.content if block.type == "text").strip()
         if not text:
             log.warning("Empty response text from model (stop_reason=%s, usage=%s)",
                         message.stop_reason, message.usage)
         return self._parse(text)
+
+    def _create_with_backoff(self, user_payload: dict, symbol: str):
+        delay = 2.0
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return self._client.messages.create(
+                    model=self._model,
+                    max_tokens=700,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": json.dumps(user_payload)}],
+                )
+            except (anthropic.OverloadedError, anthropic.RateLimitError,
+                    anthropic.APIConnectionError) as exc:
+                if attempt == self._max_retries:
+                    raise
+                log.warning("[%s] Anthropic API transient error (%s), retry %d/%d in %.0fs",
+                            symbol, type(exc).__name__, attempt, self._max_retries - 1, delay)
+                time.sleep(delay)
+                delay *= 2
 
     def _parse(self, text: str) -> TradeDecision:
         text = text.strip()
