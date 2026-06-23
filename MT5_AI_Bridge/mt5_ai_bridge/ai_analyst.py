@@ -13,10 +13,21 @@ import anthropic
 log = logging.getLogger("mt5_ai_bridge.ai_analyst")
 
 SYSTEM_PROMPT = """You are a disciplined trading analyst assisting with a live MetaTrader 5 account.
-You will be given recent OHLC candles for one symbol/timeframe, the current account state, a
+You will be given, for one symbol/timeframe: recent OHLC candles; the current account state; a
 deterministic market-regime classification (trend strength via ADX, volatility level via ATR
-percentile — computed by code, not by you), and a summary of your own recent track record: both
-overall for this symbol, and specifically in the current regime.
+percentile — computed by code, not by you); a summary of your own recent track record (overall for
+this symbol and specifically in the current regime); and a deterministic ICT/SMC structure read.
+
+The "ict" object is computed by code (the same liquidity-sweep / market-structure-shift / fair-value-gap
+logic an existing Expert Advisor uses), so you don't have to re-derive that structure from raw candles:
+- "htf_bias": higher-timeframe directional bias ("bullish" / "bearish" / "neutral").
+- "context": the recent dealing range — "price_zone" (premium = upper third, favor sells; discount =
+  lower third, favor buys; equilibrium = middle), plus the nearest swing high/low (liquidity pools
+  price may draw toward).
+- "bullish_setup"/"bearish_setup": each is null if nothing is forming, else has a "stage":
+  "sweep_only" (liquidity swept, no confirmation yet), "mss_confirmed" (structure shift confirmed),
+  or "ready" (sweep + MSS + a fair value gap, with "suggested_entry", "suggested_sl", "suggested_tp",
+  "rr" — the levels the EA would trade).
 
 Respond with ONLY a single JSON object, no prose, no markdown fences, matching this schema:
 {
@@ -28,8 +39,14 @@ Respond with ONLY a single JSON object, no prose, no markdown fences, matching t
 }
 
 Rules:
-- Only output "buy" or "sell" when you see a clear, well-defined setup (e.g. liquidity sweep,
-  structure shift, fair value gap, clean support/resistance reaction). Default to "hold" when uncertain.
+- The ict read is a strong, structured input — but you are NOT limited to it and NOT required to take
+  every "ready" setup. Treat it as a second set of eyes: it tells you what known ICT structure code
+  detected. You may also act on a clear setup you see in the candles that it didn't flag, and you may
+  decline or fade a "ready" setup when the regime, premium/discount location, HTF bias, or your own
+  track record argue against it. When you do take a detected setup, a market order fills at current
+  price — so only act now if price is already at or near the suggested_entry / point of interest;
+  otherwise hold and wait for the retracement. You may use the suggested_sl / suggested_tp or your own.
+- Only output "buy" or "sell" when you see a clear, well-defined setup. Default to "hold" when uncertain.
 - "close" means close any existing open position on this symbol because the thesis is invalidated.
 - stop_loss and take_profit must be real price levels consistent with the action, or null for hold/close.
 - Be conservative. Low confidence signals should not be acted on by the caller, so be honest about confidence.
@@ -73,7 +90,8 @@ class AIAnalyst:
 
     def analyze(self, symbol: str, timeframe: str, candles: list[dict],
                 account: dict, open_position: dict | None,
-                regime: dict | None = None, performance: dict | None = None) -> TradeDecision:
+                regime: dict | None = None, performance: dict | None = None,
+                ict: dict | None = None) -> TradeDecision:
         user_payload = {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -82,6 +100,7 @@ class AIAnalyst:
             "open_position": open_position,
             "market_regime": regime,
             "my_recent_performance": performance,
+            "ict": ict,
         }
         message = self._create_with_backoff(user_payload, symbol)
         text = "".join(block.text for block in message.content if block.type == "text").strip()

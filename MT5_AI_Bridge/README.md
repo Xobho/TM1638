@@ -84,6 +84,35 @@ back-to-back. This runs on top of, not instead of, the normal once-per-candle
 analysis. Tune `points`/`window_seconds` per symbol — gold needs a much
 larger point threshold than EURUSD to mean the same thing.
 
+## ICT/SMC structure detection (giving the AI the EA's eyes)
+
+The AI sees raw OHLC numbers, not a chart. Asking it to spot a liquidity
+sweep, structure shift, or fair value gap by eyeballing 200 rows of numbers
+every call is unreliable — so it tends to default to `hold`. Meanwhile the
+MQL5 `MMBM_LiquiditySweep_EA` already detects all of that *deterministically*
+in code. `mt5_ai_bridge/ict.py` ports that exact logic to Python so the
+bridge computes the same structure and hands it to the AI as an `ict` feature
+block alongside the candles:
+
+- **`htf_bias`** — higher-timeframe directional bias (HH/HL → bullish,
+  LH/LL → bearish, mixed → neutral), from `trading.htf_timeframe` (default H4).
+- **`context`** — the recent dealing range: `price_zone`
+  (premium/discount/equilibrium — a core ICT concept the EA doesn't expose),
+  plus the nearest swing high/low (liquidity pools price may draw toward).
+- **`bullish_setup` / `bearish_setup`** — each null if nothing's forming, else
+  a `stage`: `sweep_only`, `mss_confirmed`, or `ready` (sweep + MSS + FVG, with
+  `suggested_entry` / `suggested_sl` / `suggested_tp` / `rr` — the levels the
+  EA would trade).
+
+Crucially, **the AI is not forced to take these setups.** The system prompt
+frames `ict` as a second set of eyes: it can act on a clear setup the detector
+flagged, decline or fade a `ready` setup when regime / premium-discount / HTF
+bias / its own track record argue against it, or act on something the detector
+didn't catch. Since the bridge fills with market orders, it's told to only act
+on a detected setup when price is already at/near the suggested entry POI,
+otherwise wait for the retracement. Tune the detector under `trading.ict` in
+`config.yaml` (swing size, min FVG size, stop buffer, HTF bias on/off).
+
 ## Regime detection and performance memory (real adaptiveness, no fine-tuning)
 
 The AI itself is stateless — each call starts fresh with no memory of past
@@ -193,6 +222,7 @@ than another. Use `--journal <path>` to point at a different journal file.
 | `mt5_ai_bridge/mt5_client.py` | MT5 terminal connection, rates/positions/orders |
 | `mt5_ai_bridge/ai_analyst.py` | Builds the prompt, calls Claude, parses the JSON decision |
 | `mt5_ai_bridge/risk.py` | All trade-approval guardrails in one place |
+| `mt5_ai_bridge/ict.py` | Deterministic ICT/SMC detection (sweep/MSS/FVG/bias/premium-discount), ported from the MQL5 EA |
 | `mt5_ai_bridge/agent.py` | Main loop tying the above together |
 | `backtest.py` | Walk-forward backtest against historical candles, with a cost estimate gate before any API spend |
 

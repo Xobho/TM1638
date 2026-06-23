@@ -27,6 +27,7 @@ from pathlib import Path
 from mt5_ai_bridge.ai_analyst import AIAnalyst, SYSTEM_PROMPT
 from mt5_ai_bridge.analytics import build_trades, candles_to_dicts, load_events
 from mt5_ai_bridge.config import Config
+from mt5_ai_bridge.ict import compute_ict_features
 from mt5_ai_bridge.journal import TradeJournal
 from mt5_ai_bridge.mt5_client import MT5Client
 from mt5_ai_bridge.performance import rolling_stats
@@ -82,6 +83,7 @@ def main() -> None:
         date_to = dt.datetime.now()
         date_from = date_to - dt.timedelta(days=args.days)
         rates = mt5_client.get_rates_range(args.symbol, args.timeframe, date_from, date_to)
+        point = mt5_client.symbol_info(args.symbol).point
     finally:
         mt5_client.shutdown()
 
@@ -130,10 +132,11 @@ def main() -> None:
             return
 
     journal = TradeJournal(args.journal)
-    run_backtest(analyst, all_candles, args, journal)
+    run_backtest(analyst, all_candles, args, journal, point)
 
 
-def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: TradeJournal) -> None:
+def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: TradeJournal,
+                 point: float) -> None:
     open_trade: dict | None = None
 
     for i in range(args.bars, len(all_candles)):
@@ -145,6 +148,11 @@ def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: Tra
             "current_regime": rolling_stats(journal.path, args.symbol,
                                              regime_label=regime["label"], lookback=30),
         }
+        # HTF bias disabled in backtest: only the entry-timeframe window is
+        # fetched, so the sweep/MSS/FVG/premium-discount structure is computed
+        # without a higher-timeframe bias filter.
+        ict = compute_ict_features(window, htf_candles=None, point=point,
+                                   require_htf_bias=False)
 
         if open_trade is not None:
             entry, sl, tp, is_buy = open_trade["entry"], open_trade["sl"], open_trade["tp"], open_trade["is_buy"]
@@ -162,7 +170,7 @@ def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: Tra
             open_position=None if open_trade is None else {
                 "type": "buy" if open_trade["is_buy"] else "sell",
             },
-            regime=regime, performance=performance,
+            regime=regime, performance=performance, ict=ict,
         )
         journal.log_signal(args.symbol, decision.action, decision.confidence,
                             decision.reasoning, regime=regime["label"])

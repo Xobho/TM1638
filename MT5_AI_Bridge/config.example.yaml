@@ -21,6 +21,21 @@ trading:
   poll_seconds: 60        # how often to check for a new closed candle
   magic_number: 990177
 
+  htf_timeframe: "H4"       # higher timeframe used for ICT directional bias
+
+  # Deterministic ICT/SMC structure detection (same liquidity-sweep / MSS / FVG
+  # logic as the MQL5 EA), computed by code and fed to the AI as features so it
+  # doesn't have to re-derive structure from raw candles. The AI is NOT forced
+  # to take these setups — they're a second set of eyes alongside its own read.
+  ict:
+    enabled: true
+    htf_bars: 300             # bars pulled on htf_timeframe for the bias check
+    swing_left_right: 3       # bars each side required to confirm a swing point
+    min_fvg_points: 30        # minimum fair-value-gap size (broker points) to be tradable
+    sweep_buffer_points: 20   # buffer beyond the sweep extreme for the suggested stop
+    entry_at_midpoint: true   # suggested entry at 50% of the FVG (false = far edge)
+    require_htf_bias: true    # only surface setups aligned with HTF structure
+
   # Normal analysis only happens once per closed candle (every poll_seconds
   # check), which can miss a fast intra-candle move (e.g. a news-driven
   # sweep-and-reverse that fully plays out before the candle closes). This

@@ -13,6 +13,7 @@ import MetaTrader5 as mt5
 from .ai_analyst import AIAnalyst, TradeDecision
 from .analytics import candles_to_dicts
 from .config import Config
+from .ict import compute_ict_features
 from .journal import TradeJournal
 from .mt5_client import MT5Client
 from .performance import rolling_stats
@@ -70,6 +71,19 @@ class Agent:
         self.bars: int = t.get("bars", 200)
         self.poll_seconds: int = t.get("poll_seconds", 60)
         self.magic: int = t.get("magic_number", 990177)
+
+        ic = t.get("ict", {})
+        self.ict_enabled: bool = ic.get("enabled", True)
+        self.htf_timeframe: str = t.get("htf_timeframe", "H4")
+        self.htf_bars: int = ic.get("htf_bars", 300)
+        self.ict_params = dict(
+            swing_lr=ic.get("swing_left_right", 3),
+            min_fvg_points=ic.get("min_fvg_points", 30.0),
+            sweep_buffer_points=ic.get("sweep_buffer_points", 20.0),
+            entry_midpoint=ic.get("entry_at_midpoint", True),
+            fallback_rr=ic.get("fallback_rr", r.get("fallback_rr", 2.0)),
+            require_htf_bias=ic.get("require_htf_bias", True),
+        )
 
         vt = t.get("volatility_trigger", {})
         self.vt_enabled: bool = vt.get("enabled", False)
@@ -220,6 +234,7 @@ class Agent:
             "current_regime": rolling_stats(self.journal.path, symbol,
                                              regime_label=regime["label"], lookback=30),
         }
+        ict = self._compute_ict(symbol, candles)
 
         decision = self.analyst.analyze(
             symbol=symbol,
@@ -230,6 +245,7 @@ class Agent:
             open_position=open_position,
             regime=regime,
             performance=performance,
+            ict=ict,
         )
 
         if self.log_ai_responses:
@@ -238,6 +254,22 @@ class Agent:
         self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning,
                                  regime=regime["label"])
         self._act_on_decision(symbol, decision, positions, regime["label"])
+
+    def _compute_ict(self, symbol: str, candles: list[dict]) -> dict | None:
+        """Deterministic ICT/SMC structure (same logic as the MQL5 EA) fed to the
+        AI as features. Failure here must never kill the analysis cycle."""
+        if not self.ict_enabled:
+            return None
+        try:
+            point = self.mt5.symbol_info(symbol).point
+            htf_candles = None
+            if self.ict_params["require_htf_bias"]:
+                htf_rates = self.mt5.get_rates(symbol, self.htf_timeframe, self.htf_bars)
+                htf_candles = candles_to_dicts(htf_rates, self.htf_bars)
+            return compute_ict_features(candles, htf_candles, point, **self.ict_params)
+        except Exception:
+            log.exception("[%s] ICT feature computation failed — sending no ICT context", symbol)
+            return None
 
     def _act_on_decision(self, symbol: str, decision: TradeDecision, positions: list,
                           regime_label: str) -> None:
