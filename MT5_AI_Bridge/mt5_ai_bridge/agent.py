@@ -17,7 +17,7 @@ from .ict import compute_ict_features
 from .journal import TradeJournal
 from .mt5_client import MT5Client
 from .notify import EmailNotifier
-from .performance import rolling_stats
+from .performance import rolling_stats, strategy_stats
 from .regime import compute_regime
 from .risk import RiskLimits, RiskManager
 
@@ -259,6 +259,7 @@ class Agent:
             "overall": rolling_stats(self.journal.path, symbol, regime_label=None, lookback=30),
             "current_regime": rolling_stats(self.journal.path, symbol,
                                              regime_label=regime["label"], lookback=30),
+            "by_strategy": strategy_stats(self.journal.path, symbol),
         }
         ict = self._compute_ict(symbol, candles)
 

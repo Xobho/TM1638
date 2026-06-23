@@ -4,6 +4,8 @@ each new decision."""
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from .analytics import build_trades, load_events
 
 
@@ -25,3 +27,30 @@ def rolling_stats(journal_path: str, symbol: str, regime_label: str | None = Non
         "win_rate": round(wins / len(trades) * 100, 1),
         "avg_r": round(avg_r, 2),
     }
+
+
+def strategy_stats(journal_path: str, symbol: str, lookback: int = 200,
+                    min_trades: int = 10) -> dict:
+    """Per-ICT-strategy win-rate/avg-R, omitting any strategy with fewer than
+    min_trades completed trades — small samples are noise, not signal, so they
+    are left out of the AI's context entirely rather than shown unreliably."""
+    trades = build_trades(load_events(journal_path))
+    trades = [t for t in trades if t["symbol"] == symbol][-lookback:]
+
+    by_strategy: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        by_strategy[t.get("strategy") or "discretionary"].append(t)
+
+    out = {}
+    for strategy, ts in by_strategy.items():
+        if len(ts) < min_trades:
+            continue
+        wins = sum(1 for t in ts if t["r_multiple"] > 0)
+        avg_r = sum(t["r_multiple"] for t in ts) / len(ts)
+        out[strategy] = {
+            "count": len(ts),
+            "win_rate": round(wins / len(ts) * 100, 1),
+            "avg_r": round(avg_r, 2),
+        }
+    return out
+

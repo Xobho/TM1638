@@ -30,7 +30,7 @@ from mt5_ai_bridge.config import Config
 from mt5_ai_bridge.ict import compute_ict_features
 from mt5_ai_bridge.journal import TradeJournal
 from mt5_ai_bridge.mt5_client import MT5Client
-from mt5_ai_bridge.performance import rolling_stats
+from mt5_ai_bridge.performance import rolling_stats, strategy_stats
 from mt5_ai_bridge.regime import compute_regime
 
 # Estimate only — check https://docs.anthropic.com/en/docs/about-claude/pricing
@@ -147,6 +147,7 @@ def run_backtest(analyst: AIAnalyst, all_candles: list[dict], args, journal: Tra
             "overall": rolling_stats(journal.path, args.symbol, regime_label=None, lookback=30),
             "current_regime": rolling_stats(journal.path, args.symbol,
                                              regime_label=regime["label"], lookback=30),
+            "by_strategy": strategy_stats(journal.path, args.symbol),
         }
         # HTF bias disabled in backtest: only the entry-timeframe window is
         # fetched, so the sweep/MSS/FVG/premium-discount structure is computed
