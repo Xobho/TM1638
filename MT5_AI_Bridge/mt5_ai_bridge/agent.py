@@ -261,7 +261,10 @@ class Agent:
         )
 
         if self.log_ai_responses:
-            log.info("[%s] regime=%s AI decision: %s", symbol, regime["label"], json.dumps(decision.__dict__))
+            log.info("[%s] regime=%-18s action=%-4s conf=%.2f strategy=%s sl=%s tp=%s",
+                      symbol, regime["label"], decision.action, decision.confidence,
+                      decision.strategy or "-", decision.stop_loss, decision.take_profit)
+            log.info("[%s]   reasoning: %s", symbol, decision.reasoning)
 
         self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning,
                                  regime=regime["label"], strategy=decision.strategy)
