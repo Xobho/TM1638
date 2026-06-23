@@ -39,3 +39,7 @@ class Config:
     @property
     def logging_cfg(self) -> dict:
         return self.raw.get("logging", {})
+
+    @property
+    def notifications(self) -> dict:
+        return self.raw.get("notifications", {})

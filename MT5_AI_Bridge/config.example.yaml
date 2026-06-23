@@ -66,3 +66,15 @@ risk:
 logging:
   log_dir: "logs"
   log_ai_responses: true
+
+notifications:
+  # Email alert on every trade open and every close (SL hit, TP hit, or AI-initiated).
+  # Password is NEVER stored here — set it via the env var named by password_env.
+  enabled: false
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "you@gmail.com"
+  password_env: "BRIDGE_EMAIL_PASSWORD"   # e.g. a Gmail App Password, not your real password
+  from_addr: "you@gmail.com"
+  to_addr: "you@gmail.com"
+  notify_dry_run: true     # set false once live, to only get emails for real trades

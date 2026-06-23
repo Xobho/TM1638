@@ -16,6 +16,7 @@ from .config import Config
 from .ict import compute_ict_features
 from .journal import TradeJournal
 from .mt5_client import MT5Client
+from .notify import EmailNotifier
 from .performance import rolling_stats
 from .regime import compute_regime
 from .risk import RiskLimits, RiskManager
@@ -97,6 +98,18 @@ class Agent:
         self.log_ai_responses = config.logging_cfg.get("log_ai_responses", True)
         self._last_bar_time: dict[str, int] = {}
 
+        n = config.notifications
+        self.notifier = EmailNotifier(
+            enabled=n.get("enabled", False),
+            smtp_host=n.get("smtp_host", ""),
+            smtp_port=n.get("smtp_port", 587),
+            smtp_user=n.get("smtp_user", ""),
+            password_env=n.get("password_env", "BRIDGE_EMAIL_PASSWORD"),
+            from_addr=n.get("from_addr", n.get("smtp_user", "")),
+            to_addr=n.get("to_addr", ""),
+            notify_dry_run=n.get("notify_dry_run", True),
+        )
+
         log_dir = config.logging_cfg.get("log_dir", "logs")
         self.journal = TradeJournal(str(Path(log_dir) / "trade_journal.jsonl"))
         self._virtual_trades: dict[str, dict] = {}   # dry-run open "trades" by symbol
@@ -154,9 +167,10 @@ class Agent:
             hit_tp = price >= v["tp"] if is_buy else price <= v["tp"]
             if hit_sl or hit_tp:
                 exit_price = v["sl"] if hit_sl else v["tp"]
-                self.journal.log_close(symbol, exit_price, result="sl" if hit_sl else "tp",
-                                        pnl=None, dry_run=True)
+                result = "sl" if hit_sl else "tp"
+                self.journal.log_close(symbol, exit_price, result=result, pnl=None, dry_run=True)
                 log.info("[%s] [DRY RUN] virtual trade closed: %s", symbol, "SL hit" if hit_sl else "TP hit")
+                self.notifier.trade_closed(symbol, result, exit_price, pnl=None, dry_run=True)
                 del self._virtual_trades[symbol]
 
         ticket = self._open_tickets.get(symbol)
@@ -166,10 +180,10 @@ class Agent:
             result = self.mt5.closed_position_result(ticket)
             if result is not None:
                 exit_price, profit = result
-                self.journal.log_close(symbol, exit_price,
-                                        result="win" if profit > 0 else "loss",
-                                        pnl=profit, dry_run=False)
+                result = "win" if profit > 0 else "loss"
+                self.journal.log_close(symbol, exit_price, result=result, pnl=profit, dry_run=False)
                 log.info("[%s] position closed: profit=%.2f", symbol, profit)
+                self.notifier.trade_closed(symbol, result, exit_price, pnl=profit, dry_run=False)
                 del self._open_tickets[symbol]
 
     def _check_volatility_trigger(self, symbol: str, now: float) -> None:
@@ -300,6 +314,7 @@ class Agent:
                 exit_price = tick.bid if virtual["action"] == "buy" else tick.ask
                 log.info("[%s] [DRY RUN] Would close virtual trade on AI 'close' signal", symbol)
                 self.journal.log_close(symbol, exit_price, result="closed", pnl=None, dry_run=True)
+                self.notifier.trade_closed(symbol, "closed", exit_price, pnl=None, dry_run=True)
                 del self._virtual_trades[symbol]
             return
 
@@ -346,6 +361,8 @@ class Agent:
                                    regime=regime_label, strategy=decision.strategy)
             self._virtual_trades[symbol] = {"action": decision.action, "entry": entry, "sl": sl,
                                              "tp": tp, "lots": lots}
+            self.notifier.trade_opened(symbol, decision.action, entry, sl, tp, lots,
+                                        decision.confidence, decision.strategy, dry_run=True)
             self.risk.state.register_trade()
             return
 
@@ -360,6 +377,8 @@ class Agent:
                                    decision.confidence, decision.reasoning, dry_run=False,
                                    regime=regime_label, ticket=result.order, strategy=decision.strategy)
             self._open_tickets[symbol] = result.order
+            self.notifier.trade_opened(symbol, decision.action, entry, sl, tp, lots,
+                                        decision.confidence, decision.strategy, dry_run=False)
         self.risk.state.register_trade()
 
     def _close(self, symbol: str, position) -> None:

@@ -221,6 +221,61 @@ whether the AI's "high confidence" calls actually win more than its
 "medium confidence" ones, or whether it's better at one symbol/direction
 than another. Use `--journal <path>` to point at a different journal file.
 
+## Email notifications (trade opened / SL or TP hit / closed)
+
+`mt5_ai_bridge/notify.py` sends an email on every trade open and every close
+(SL hit, TP hit, or an AI-issued `close`) — real or dry-run. Configure under
+`notifications` in `config.yaml`:
+
+```yaml
+notifications:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "you@gmail.com"
+  password_env: "BRIDGE_EMAIL_PASSWORD"
+  from_addr: "you@gmail.com"
+  to_addr: "you@gmail.com"
+  notify_dry_run: true     # set false once live, to only get emails for real trades
+```
+
+The password is **never** stored in `config.yaml` — set it as an environment
+variable (the name given by `password_env`) before starting the bridge. For
+Gmail, use an [App Password](https://myaccount.google.com/apppasswords), not
+your real account password (requires 2-Step Verification to be enabled).
+A failed send is logged and swallowed — it never interrupts the trading loop.
+
+## Running unattended in the background (Windows)
+
+Since MT5 must be installed and logged in on the same Windows machine, the
+bridge needs to run there too, outside of any terminal window you might close.
+
+**Simplest: Task Scheduler, running at logon**
+
+1. Create a `run_bridge.bat` in the `MT5_AI_Bridge` folder:
+   ```bat
+   @echo off
+   cd /d C:\path\to\MT5_AI_Bridge
+   set ANTHROPIC_API_KEY=sk-ant-...
+   set BRIDGE_EMAIL_PASSWORD=your-app-password
+   pythonw run.py
+   ```
+   (`pythonw.exe` instead of `python.exe` runs with no visible console window.)
+2. Open **Task Scheduler** → *Create Task* (not *Basic Task*, so you get more options).
+3. **General** tab: "Run whether user is logged on or not"; check "Run with highest privileges" if MT5 needs it.
+4. **Triggers**: New → *At log on* (or *At startup* if you want it before login).
+5. **Actions**: New → Program: `run_bridge.bat`, Start in: the `MT5_AI_Bridge` folder.
+6. **Settings**: enable "If the task fails, restart every" (e.g. 1 minute, up to 3 times) — covers the bridge crashing or MT5 not being ready yet.
+
+Logs still go to `logs/bridge.log` regardless of how it's launched, so you can
+check on it any time without needing the window open.
+
+**More robust: run it as an actual Windows Service** via
+[NSSM](https://nssm.cc/) (`nssm install MT5AIBridge`, point it at
+`pythonw.exe run.py` with the working directory set, set environment
+variables in the service's "Environment" tab) — survives reboots and shows
+up in `services.msc`, but Task Scheduler above is sufficient for most setups.
+
 ## Safety notes — read before setting `dry_run: false`
 
 - **Start in `dry_run: true` and watch the logs** (`logs/bridge.log`) for at
@@ -247,6 +302,7 @@ than another. Use `--journal <path>` to point at a different journal file.
 | `mt5_ai_bridge/config.py` | Loads `config.yaml` |
 | `mt5_ai_bridge/mt5_client.py` | MT5 terminal connection, rates/positions/orders |
 | `mt5_ai_bridge/ai_analyst.py` | Builds the prompt, calls Claude, parses the JSON decision |
+| `mt5_ai_bridge/notify.py` | Email alerts on trade open/close (SL/TP/AI close) |
 | `mt5_ai_bridge/risk.py` | All trade-approval guardrails in one place |
 | `mt5_ai_bridge/ict.py` | Suite of deterministic ICT/SMC strategy detectors (sweep/MSS/FVG, order block, FVG, breaker, turtle soup, OTE) + bias/premium-discount context |
 | `mt5_ai_bridge/agent.py` | Main loop tying the above together |
