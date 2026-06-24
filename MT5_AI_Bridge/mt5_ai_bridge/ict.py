@@ -473,7 +473,7 @@ def compute_htf_bias(htf_candles: list[dict], k: int) -> tuple[bool, bool]:
         return True, True
     highs: list[float] = []
     lows: list[float] = []
-    for i in range(n - k - 1, k - 1, -1):
+    for i in range(k, n - k):
         if _is_swing_high(r, i, k):
             highs.append(r[i]["high"])
         if _is_swing_low(r, i, k):

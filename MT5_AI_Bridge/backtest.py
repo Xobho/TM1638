@@ -37,7 +37,7 @@ from mt5_ai_bridge.regime import compute_regime
 # for the real rate on your account before relying on this number.
 PRICE_PER_MTOK_INPUT = 3.0
 PRICE_PER_MTOK_OUTPUT = 15.0
-AVG_OUTPUT_TOKENS_PER_CALL = 200  # typical short JSON decision; max_tokens cap is 700
+AVG_OUTPUT_TOKENS_PER_CALL = 200  # typical short JSON decision; max_tokens cap is 1024
 
 
 def estimate_cost(num_calls: int, sample_payload: dict) -> dict:

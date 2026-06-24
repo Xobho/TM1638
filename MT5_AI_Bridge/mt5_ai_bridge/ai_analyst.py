@@ -48,7 +48,9 @@ uses), so you don't have to re-derive structure from raw candles:
   market order); "forming" means the structure is valid but price must still retrace into the zone.
   An empty "setups" list means code found no clean structure this candle.
 
-Respond with ONLY a single JSON object, no prose, no markdown fences, matching this schema:
+Your entire reply must be exactly one JSON object: the very first character must be "{" and the last
+must be "}". No prose, no headers, no markdown fences, no analysis before or after it — put any
+reasoning you need inside the "reasoning" field itself, matching this schema:
 {
   "action": "buy" | "sell" | "close" | "hold",
   "confidence": number between 0 and 1,
@@ -139,7 +141,7 @@ class AIAnalyst:
             try:
                 return self._client.messages.create(
                     model=self._model,
-                    max_tokens=700,
+                    max_tokens=1024,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": json.dumps(user_payload)}],
                 )
@@ -160,7 +162,7 @@ class AIAnalyst:
                 text = text.rstrip()[:-3]
             text = text.strip()
         try:
-            data = json.loads(text)
+            data = self._extract_json(text)
             action = str(data.get("action", "hold")).lower()
             if action not in ("buy", "sell", "close", "hold"):
                 action = "hold"
@@ -177,3 +179,26 @@ class AIAnalyst:
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             log.warning("Could not parse AI response as JSON (%s): %s", exc, text[:300])
             return TradeDecision.hold(f"unparseable AI response: {exc}")
+
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        """The model is told to respond with ONLY JSON, but occasionally adds
+        prose/markdown around or before it anyway. Try a straight parse first;
+        if that fails, fall back to the first balanced {...} object found
+        anywhere in the text rather than giving up and forcing a hold."""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{")
+        if start == -1:
+            raise json.JSONDecodeError("no JSON object found", text, 0)
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(text[start:i + 1])
+        raise json.JSONDecodeError("no balanced JSON object found", text, start)
