@@ -20,6 +20,7 @@ from .notify import EmailNotifier
 from .performance import rolling_stats, strategy_stats
 from .regime import compute_regime
 from .risk import RiskLimits, RiskManager
+from .snapshot import SnapshotPusher
 
 log = logging.getLogger("mt5_ai_bridge.agent")
 
@@ -115,6 +116,17 @@ class Agent:
         self._virtual_trades: dict[str, dict] = {}   # dry-run open "trades" by symbol
         self._open_tickets: dict[str, int] = {}      # real open position tickets by symbol
 
+        s = config.snapshot
+        self.snapshot_pusher: SnapshotPusher | None = None
+        if s.get("enabled", False):
+            repo_root = Path(__file__).resolve().parents[2]
+            self.snapshot_pusher = SnapshotPusher(
+                repo_dir=s.get("repo_dir", str(repo_root)),
+                snapshot_dir=s.get("snapshot_dir", "MT5_AI_Bridge/live_snapshots"),
+                branch=s.get("branch", "claude/expert-advisor-tto2nu"),
+                push_interval_seconds=s.get("push_interval_seconds", 300),
+            )
+
         if self.risk.limits.dry_run:
             log.warning("DRY RUN MODE — no real orders will be sent. Set risk.dry_run: false to go live.")
         else:
@@ -122,6 +134,8 @@ class Agent:
 
     def run_forever(self) -> None:
         self.mt5.connect()
+        if self.snapshot_pusher is not None:
+            self.snapshot_pusher.start()
         last_poll = 0.0
         sleep_step = min(self.vt_check_seconds, self.poll_seconds) if self.vt_enabled else self.poll_seconds
         try:
@@ -145,6 +159,8 @@ class Agent:
 
                 time.sleep(sleep_step)
         finally:
+            if self.snapshot_pusher is not None:
+                self.snapshot_pusher.stop()
             self.mt5.shutdown()
 
     def run_once(self) -> None:
@@ -153,6 +169,8 @@ class Agent:
             for symbol in self.symbols:
                 self._check_open_trades(symbol)
                 self._process_symbol(symbol, force=True)
+            if self.snapshot_pusher is not None:
+                self.snapshot_pusher.push_now()
         finally:
             self.mt5.shutdown()
 
@@ -283,6 +301,24 @@ class Agent:
 
         self.journal.log_signal(symbol, decision.action, decision.confidence, decision.reasoning,
                                  regime=regime["label"], strategy=decision.strategy)
+
+        if self.snapshot_pusher is not None:
+            self.snapshot_pusher.write(symbol, {
+                "symbol": symbol,
+                "timeframe": self.timeframe,
+                "candles": candles,
+                "regime": regime,
+                "ict": ict,
+                "decision": {
+                    "action": decision.action,
+                    "confidence": decision.confidence,
+                    "strategy": decision.strategy,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit": decision.take_profit,
+                    "reasoning": decision.reasoning,
+                },
+            })
+
         self._act_on_decision(symbol, decision, positions, virtual, regime["label"])
 
     def _compute_ict(self, symbol: str, candles: list[dict]) -> dict | None:

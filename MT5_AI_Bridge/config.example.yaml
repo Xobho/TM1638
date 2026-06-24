@@ -67,6 +67,19 @@ logging:
   log_dir: "logs"
   log_ai_responses: true
 
+# Periodically writes the latest candles/regime/ICT setups/decision for each
+# symbol to a JSON file in this repo and pushes it on a fixed interval, so the
+# live feed can be inspected (e.g. via `git pull`) without any inbound network
+# access to this machine. The trusted machine only ever pushes data outward.
+# Requires non-interactive git auth (SSH key or credential helper) already set
+# up here, since the push happens unattended in the background.
+snapshot:
+  enabled: false
+  branch: "claude/expert-advisor-tto2nu"   # must match the branch this code is deployed from
+  snapshot_dir: "MT5_AI_Bridge/live_snapshots"  # path inside the repo, one JSON file per symbol
+  push_interval_seconds: 300               # how often to commit + push (5 min)
+  # repo_dir: ""   # override only if this checkout's repo root can't be auto-detected
+
 notifications:
   # Email alert on every trade open and every close (SL hit, TP hit, or AI-initiated).
   # Password is NEVER stored here — set it via the env var named by password_env.

@@ -43,3 +43,7 @@ class Config:
     @property
     def notifications(self) -> dict:
         return self.raw.get("notifications", {})
+
+    @property
+    def snapshot(self) -> dict:
+        return self.raw.get("snapshot", {})
