@@ -106,6 +106,24 @@ def _stage_from_zone(series: list[dict], zone_lo: float, zone_hi: float,
     return "ready" if (zone_lo - buf) <= price <= (zone_hi + buf) else "forming"
 
 
+def _zone_tested(series: list[dict], ref_idx: int, zone_lo: float, zone_hi: float,
+                 point: float, buffer_pts: float) -> bool:
+    """True if any candle between the zone's formation and now (exclusive of the
+    candle that formed it) already had a wick reach into the zone -- i.e. price
+    has revisited it at least once, even if it never closed inside. 'stage' alone
+    can't tell a never-touched zone apart from one that was already tested and
+    rejected, which matters: a tested zone has weaker draw than a fresh one."""
+    if ref_idx <= 0:
+        return False
+    buf = buffer_pts * point
+    lo, hi = zone_lo - buf, zone_hi + buf
+    for idx in range(0, ref_idx):
+        c = series[idx]
+        if c["low"] <= hi and c["high"] >= lo:
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Strategy 1: liquidity sweep -> market structure shift -> FVG (the EA model)
 # --------------------------------------------------------------------------- #
@@ -222,6 +240,8 @@ def _detect_sweep_mss(series: list[dict], total: int, bullish: bool, point: floa
     out["stage"] = "ready"
     out["fvg_high"] = round(fvg["fvg_high"], digits)
     out["fvg_low"] = round(fvg["fvg_low"], digits)
+    out["tested"] = _zone_tested(series, fvg["fvg_idx"], fvg["fvg_low"], fvg["fvg_high"],
+                                 point, sweep_buffer_points)
     out["formed_by"] = [series[sweep["sweep_idx"]]["time"], series[mss["mss_idx"]]["time"],
                         series[fvg["fvg_idx"]]["time"]]
 
@@ -281,6 +301,7 @@ def _detect_order_block(series: list[dict], total: int, bullish: bool, point: fl
         "strategy": "order_block",
         "direction": "bullish" if bullish else "bearish",
         "stage": _stage_from_zone(series, zone_lo, zone_hi, point, buffer_pts),
+        "tested": _zone_tested(series, ob, zone_lo, zone_hi, point, buffer_pts),
         "zone_high": round(zone_hi, digits),
         "zone_low": round(zone_lo, digits),
         "formed_by": [series[sh if bullish else slw]["time"], series[brk]["time"], series[ob]["time"]],
@@ -329,6 +350,7 @@ def _detect_fvg(series: list[dict], total: int, bullish: bool, point: float,
             "strategy": "fair_value_gap",
             "direction": "bullish" if bullish else "bearish",
             "stage": _stage_from_zone(series, zone_lo, zone_hi, point, buffer_pts),
+            "tested": _zone_tested(series, i - 1, zone_lo, zone_hi, point, buffer_pts),
             "zone_high": round(zone_hi, digits),
             "zone_low": round(zone_lo, digits),
             # the 3 candles (oldest -> newest) whose wicks define this gap --
@@ -381,6 +403,7 @@ def _detect_breaker(series: list[dict], total: int, bullish: bool, point: float,
         "strategy": "breaker_block",
         "direction": "bullish" if bullish else "bearish",
         "stage": _stage_from_zone(series, zone_lo, zone_hi, point, buffer_pts),
+        "tested": _zone_tested(series, ob, zone_lo, zone_hi, point, buffer_pts),
         "zone_high": round(zone_hi, digits),
         "zone_low": round(zone_lo, digits),
         "formed_by": [series[sweep["sweep_idx"]]["time"], series[mss["mss_idx"]]["time"],
@@ -420,6 +443,8 @@ def _detect_turtle_soup(series: list[dict], total: int, bullish: bool, point: fl
             "direction": "bullish" if bullish else "bearish",
             # momentum reversal: only actionable while the false break is fresh
             "stage": "ready" if i <= 2 else "forming",
+            "tested": _zone_tested(series, i, c["low"] if bullish else c["high"],
+                                   c["low"] if bullish else c["high"], point, buffer_pts),
             "false_break_extreme": round(c["low"] if bullish else c["high"], digits),
             "bars_since_break": i,
             "formed_by": [series[j]["time"] for j in (i + TURTLE_LOOKBACK, i + 1, i)],
@@ -469,6 +494,7 @@ def _detect_ote(series: list[dict], total: int, bullish: bool, point: float,
         "strategy": "optimal_trade_entry",
         "direction": "bullish" if bullish else "bearish",
         "stage": _stage_from_zone(series, z_lo, z_hi, point, buffer_pts),
+        "tested": _zone_tested(series, sh if bullish else slw, z_lo, z_hi, point, buffer_pts),
         "ote_zone_high": round(z_hi, digits),
         "ote_zone_low": round(z_lo, digits),
         "formed_by": [series[slw if bullish else sh]["time"], series[sh if bullish else slw]["time"]],
@@ -525,6 +551,7 @@ def _detect_continuation(series: list[dict], total: int, bullish: bool, point: f
         "strategy": "continuation_retest",
         "direction": "bullish" if bullish else "bearish",
         "stage": _stage_from_zone(series, level, level, point, buffer_pts),
+        "tested": _zone_tested(series, brk, level, level, point, buffer_pts),
         "broken_level": round(level, digits),
         "bars_since_break": brk,
         "formed_by": [series[sh if bullish else slw]["time"], series[brk]["time"]],

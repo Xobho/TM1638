@@ -53,7 +53,12 @@ uses), so you don't have to re-derive structure from raw candles:
       Use it for strong trending moves that run through retracement zones without pausing in them.
   For the zone strategies, stage "ready" means price is AT the point of interest now (actionable on a
   market order); "forming" means the structure is valid but price must still retrace into the zone.
-  An empty "setups" list means code found no clean structure this candle.
+  An empty "setups" list means code found no clean structure this candle. Most setups also carry a
+  "tested" boolean: true means price has already wicked back into this zone/level at least once since
+  it formed (even if it never closed inside), regardless of whether it's "ready" right now. "stage" alone
+  can't distinguish a never-touched zone from one already tested and rejected once — "tested": true is a
+  weaker, used-up version of the setup (the market already had its first shot at it and continued), so
+  treat a tested zone with more caution / lower conviction than a fresh, untested one of the same stage.
 
 The "volume_profile" object (may be null if there isn't enough data) is a tick-volume profile of the
 visible candle window — "poc" (point of control, the most-traded price), "value_area_high"/"value_area_low"
