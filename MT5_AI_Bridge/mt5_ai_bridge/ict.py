@@ -167,7 +167,7 @@ def _find_entry_fvg(r: list[dict], sweep_idx: int, mss_idx: int, bullish: bool,
             gap_high = r[i - 1]["high"]
             gap_low = r[i + 1]["low"]
         if gap_low > gap_high and (gap_low - gap_high) >= min_size:
-            return {"fvg_high": gap_low, "fvg_low": gap_high}
+            return {"fvg_high": gap_low, "fvg_low": gap_high, "fvg_idx": i}
     return None
 
 
@@ -222,6 +222,8 @@ def _detect_sweep_mss(series: list[dict], total: int, bullish: bool, point: floa
     out["stage"] = "ready"
     out["fvg_high"] = round(fvg["fvg_high"], digits)
     out["fvg_low"] = round(fvg["fvg_low"], digits)
+    out["formed_by"] = [series[sweep["sweep_idx"]]["time"], series[mss["mss_idx"]]["time"],
+                        series[fvg["fvg_idx"]]["time"]]
 
     entry, sl = _compute_entry_sl(bullish, fvg["fvg_high"], fvg["fvg_low"],
                                   sweep["sweep_price"], point, entry_midpoint,
@@ -281,6 +283,7 @@ def _detect_order_block(series: list[dict], total: int, bullish: bool, point: fl
         "stage": _stage_from_zone(series, zone_lo, zone_hi, point, buffer_pts),
         "zone_high": round(zone_hi, digits),
         "zone_low": round(zone_lo, digits),
+        "formed_by": [series[sh if bullish else slw]["time"], series[brk]["time"], series[ob]["time"]],
     }
     out.update(_finalize(entry, sl, tp, digits))
     return out
@@ -328,6 +331,9 @@ def _detect_fvg(series: list[dict], total: int, bullish: bool, point: float,
             "stage": _stage_from_zone(series, zone_lo, zone_hi, point, buffer_pts),
             "zone_high": round(zone_hi, digits),
             "zone_low": round(zone_lo, digits),
+            # the 3 candles (oldest -> newest) whose wicks define this gap --
+            # match these times against your chart to verify the zone directly
+            "formed_by": [series[i + 1]["time"], series[i]["time"], series[i - 1]["time"]],
         }
         out.update(_finalize(entry, sl, tp, digits))
         return out
@@ -377,6 +383,8 @@ def _detect_breaker(series: list[dict], total: int, bullish: bool, point: float,
         "stage": _stage_from_zone(series, zone_lo, zone_hi, point, buffer_pts),
         "zone_high": round(zone_hi, digits),
         "zone_low": round(zone_lo, digits),
+        "formed_by": [series[sweep["sweep_idx"]]["time"], series[mss["mss_idx"]]["time"],
+                      series[ob]["time"]],
     }
     out.update(_finalize(entry, sl, tp, digits))
     return out
@@ -414,6 +422,7 @@ def _detect_turtle_soup(series: list[dict], total: int, bullish: bool, point: fl
             "stage": "ready" if i <= 2 else "forming",
             "false_break_extreme": round(c["low"] if bullish else c["high"], digits),
             "bars_since_break": i,
+            "formed_by": [series[j]["time"] for j in (i + TURTLE_LOOKBACK, i + 1, i)],
         }
         out.update(_finalize(entry, sl, tp, digits))
         return out
@@ -462,6 +471,7 @@ def _detect_ote(series: list[dict], total: int, bullish: bool, point: float,
         "stage": _stage_from_zone(series, z_lo, z_hi, point, buffer_pts),
         "ote_zone_high": round(z_hi, digits),
         "ote_zone_low": round(z_lo, digits),
+        "formed_by": [series[slw if bullish else sh]["time"], series[sh if bullish else slw]["time"]],
     }
     out.update(_finalize(entry, sl, tp, digits))
     return out
@@ -517,6 +527,7 @@ def _detect_continuation(series: list[dict], total: int, bullish: bool, point: f
         "stage": _stage_from_zone(series, level, level, point, buffer_pts),
         "broken_level": round(level, digits),
         "bars_since_break": brk,
+        "formed_by": [series[sh if bullish else slw]["time"], series[brk]["time"]],
     }
     out.update(_finalize(entry, sl, tp, digits))
     return out

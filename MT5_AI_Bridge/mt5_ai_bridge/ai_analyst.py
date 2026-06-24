@@ -35,7 +35,9 @@ uses), so you don't have to re-derive structure from raw candles:
   "equal_lows" (resting liquidity pools price may draw toward).
 - "setups": a list of every ICT setup currently detected, across BOTH directions and SEVERAL
   strategies. Each entry has a "strategy", a "direction" ("bullish"/"bearish"), a "stage", and (when
-  actionable) "suggested_entry" / "suggested_sl" / "suggested_tp" / "rr" plus the relevant zone.
+  actionable) "suggested_entry" / "suggested_sl" / "suggested_tp" / "rr" plus the relevant zone. Each
+  entry also has "formed_by": the candle "time" values of the specific candles whose wicks/closes
+  produced that zone or level, in case you need to reference exactly which candles a setup is built from.
   The strategies are:
     - "liquidity_sweep_mss": sweep of liquidity -> market-structure shift -> fair-value-gap entry.
       Its stage progresses "sweep_only" -> "mss_confirmed" -> "ready".
