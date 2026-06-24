@@ -60,7 +60,7 @@ risk:
   max_open_positions: 3
   max_daily_trades: 6
   max_spread_points: 30
-  min_confidence: 0.65     # ignore AI signals below this confidence
+  min_confidence: 0.55     # ignore AI signals below this confidence
   fallback_rr: 2.0         # used if the AI doesn't supply a take-profit
 
 logging:

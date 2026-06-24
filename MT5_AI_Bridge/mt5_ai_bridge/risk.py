@@ -18,7 +18,7 @@ class RiskLimits:
     max_open_positions: int = 3
     max_daily_trades: int = 6
     max_spread_points: float = 30.0
-    min_confidence: float = 0.65
+    min_confidence: float = 0.55
     fallback_rr: float = 2.0
 
 

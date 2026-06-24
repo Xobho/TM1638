@@ -55,6 +55,15 @@ uses), so you don't have to re-derive structure from raw candles:
   market order); "forming" means the structure is valid but price must still retrace into the zone.
   An empty "setups" list means code found no clean structure this candle.
 
+The "volume_profile" object (may be null if there isn't enough data) is a tick-volume profile of the
+visible candle window — "poc" (point of control, the most-traded price), "value_area_high"/"value_area_low"
+(the range holding ~70% of volume), and "hvn_zones"/"lvn_zones" (high/low tick-volume price bands). Its
+own "note" field reminds you this is tick volume (a proxy for activity), not true traded volume, so treat
+it ONLY as a soft confluence adjustment — e.g. a setup's zone overlapping an HVN or the POC is a mildly
+supportive sign; a setup sitting in a LVN deserves a bit more caution since price may have moved through
+that level quickly without real interest. Never let volume_profile alone justify a trade or override clear
+ICT structure / htf_bias.
+
 Your entire reply must be exactly one JSON object: the very first character must be "{" and the last
 must be "}". No prose, no headers, no markdown fences, no analysis before or after it — put any
 reasoning you need inside the "reasoning" field itself, matching this schema:
@@ -124,7 +133,7 @@ class AIAnalyst:
     def analyze(self, symbol: str, timeframe: str, candles: list[dict],
                 account: dict, open_position: dict | None,
                 regime: dict | None = None, performance: dict | None = None,
-                ict: dict | None = None) -> TradeDecision:
+                ict: dict | None = None, volume_profile: dict | None = None) -> TradeDecision:
         user_payload = {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -134,6 +143,7 @@ class AIAnalyst:
             "market_regime": regime,
             "my_recent_performance": performance,
             "ict": ict,
+            "volume_profile": volume_profile,
         }
         message = self._create_with_backoff(user_payload, symbol)
         text = "".join(block.text for block in message.content if block.type == "text").strip()

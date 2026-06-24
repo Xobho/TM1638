@@ -21,6 +21,7 @@ from .performance import rolling_stats, strategy_stats
 from .regime import compute_regime
 from .risk import RiskLimits, RiskManager
 from .snapshot import SnapshotPusher
+from .volume_profile import compute_volume_profile
 
 log = logging.getLogger("mt5_ai_bridge.agent")
 
@@ -63,7 +64,7 @@ class Agent:
             max_open_positions=r.get("max_open_positions", 3),
             max_daily_trades=r.get("max_daily_trades", 6),
             max_spread_points=r.get("max_spread_points", 30.0),
-            min_confidence=r.get("min_confidence", 0.65),
+            min_confidence=r.get("min_confidence", 0.55),
             fallback_rr=r.get("fallback_rr", 2.0),
         ))
 
@@ -280,6 +281,7 @@ class Agent:
             "by_strategy": strategy_stats(self.journal.path, symbol),
         }
         ict = self._compute_ict(symbol, candles)
+        volume_profile = compute_volume_profile(candles)
 
         decision = self.analyst.analyze(
             symbol=symbol,
@@ -291,6 +293,7 @@ class Agent:
             regime=regime,
             performance=performance,
             ict=ict,
+            volume_profile=volume_profile,
         )
 
         if self.log_ai_responses:
@@ -309,6 +312,7 @@ class Agent:
                 "candles": candles,
                 "regime": regime,
                 "ict": ict,
+                "volume_profile": volume_profile,
                 "decision": {
                     "action": decision.action,
                     "confidence": decision.confidence,
