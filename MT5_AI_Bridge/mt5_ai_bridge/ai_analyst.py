@@ -44,6 +44,11 @@ uses), so you don't have to re-derive structure from raw candles:
     - "breaker_block": an order block that failed and flipped; entry on the retest.
     - "turtle_soup": a false breakout of the prior range extreme that closed back inside (reversal).
     - "optimal_trade_entry": the 0.62-0.79 fib retracement zone of the most recent impulse leg.
+    - "continuation_retest": a swing level price has already broken through, now being retested from
+      the breakout side. Unlike the five strategies above (all reversal/retracement entries that wait
+      for a pullback INTO a zone), this is a trend-CONTINUATION entry: the level has flipped from
+      resistance to support (or vice versa) and price is testing that flip without a deep retrace.
+      Use it for strong trending moves that run through retracement zones without pausing in them.
   For the zone strategies, stage "ready" means price is AT the point of interest now (actionable on a
   market order); "forming" means the structure is valid but price must still retrace into the zone.
   An empty "setups" list means code found no clean structure this candle.

@@ -18,6 +18,11 @@ Strategies detected (each evaluated for both long and short every call):
                         closes back inside (a liquidity grab); reversal.
 - optimal_trade_entry : the 0.62-0.79 fib retracement zone of the most recent
                         impulse leg (ICT "OTE").
+- continuation_retest : a recently broken swing level, retested from the
+                        breakout side; entry in the direction of the break
+                        without waiting for a deep reversal-style retrace
+                        (covers trending moves the other five strategies,
+                        which are all reversal/retracement entries, miss).
 
 Candles in are ascending (oldest first, index -1 = most recent), matching
 mt5.copy_rates ordering. Internally we reverse to a newest-first "series" so the
@@ -41,6 +46,7 @@ STRATEGIES = (
     "breaker_block",
     "turtle_soup",
     "optimal_trade_entry",
+    "continuation_retest",
 )
 
 
@@ -462,6 +468,61 @@ def _detect_ote(series: list[dict], total: int, bullish: bool, point: float,
 
 
 # --------------------------------------------------------------------------- #
+# Strategy 7: continuation retest (break of a swing level, retested from the
+# breakout side -- a trend-continuation entry, not a reversal/retracement one)
+# --------------------------------------------------------------------------- #
+
+def _detect_continuation(series: list[dict], total: int, bullish: bool, point: float,
+                         k: int, buffer_pts: float, fallback_rr: float, digits: int):
+    """The other strategies all wait for price to retrace into a zone before
+    entering. This one instead catches a move that has already broken a swing
+    level and is now retesting that level from the breakout side -- i.e. the
+    market is continuing, not reversing, and the level has flipped from
+    resistance to support (or vice versa)."""
+    price = series[0]["close"]
+    buf = buffer_pts * point
+    invalidation = buf * 3  # how far back through the level kills the thesis
+    if bullish:
+        sh = _recent_swing(series, total, k, want_high=True)
+        if sh is None:
+            return None
+        level = series[sh]["high"]
+        brk = next((b for b in range(sh - 1, -1, -1) if series[b]["close"] > level), None)
+        if brk is None or brk > MAX_BARS_AFTER_SWEEP:
+            return None
+        if price < level - invalidation:
+            return None  # closed back below the level -> continuation failed
+        entry = level
+        sl = level - invalidation
+        target = _find_liquidity_target(series, total, True, entry, k)
+        tp = target if target is not None else entry + abs(entry - sl) * fallback_rr
+    else:
+        slw = _recent_swing(series, total, k, want_high=False)
+        if slw is None:
+            return None
+        level = series[slw]["low"]
+        brk = next((b for b in range(slw - 1, -1, -1) if series[b]["close"] < level), None)
+        if brk is None or brk > MAX_BARS_AFTER_SWEEP:
+            return None
+        if price > level + invalidation:
+            return None
+        entry = level
+        sl = level + invalidation
+        target = _find_liquidity_target(series, total, False, entry, k)
+        tp = target if target is not None else entry - abs(entry - sl) * fallback_rr
+
+    out = {
+        "strategy": "continuation_retest",
+        "direction": "bullish" if bullish else "bearish",
+        "stage": _stage_from_zone(series, level, level, point, buffer_pts),
+        "broken_level": round(level, digits),
+        "bars_since_break": brk,
+    }
+    out.update(_finalize(entry, sl, tp, digits))
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Context: HTF bias, nearest swings, premium/discount, equal highs/lows
 # --------------------------------------------------------------------------- #
 
@@ -576,6 +637,8 @@ def _detect_all(series: list[dict], total: int, bullish: bool, point: float, k: 
                         fallback_rr, digits),
         _detect_turtle_soup(series, total, bullish, point, k, sweep_buffer_points, digits),
         _detect_ote(series, total, bullish, point, k, sweep_buffer_points, digits),
+        _detect_continuation(series, total, bullish, point, k, sweep_buffer_points,
+                             fallback_rr, digits),
     ]
     return [d for d in detectors if d is not None]
 
