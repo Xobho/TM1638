@@ -29,23 +29,22 @@
 //|               it formed (even if it never closed inside) -- a    |
 //|               used-up zone, weaker than a fresh one.             |
 //|                                                                  |
-//|  The seven strategies (each long & short):                       |
-//|   1. Liquidity Sweep + MSS (SWEEP): wick sweeps a swing & closes |
-//|      back inside -> market-structure shift -> entry in the FVG   |
-//|      of the impulse leg. Stages: swept -> mss -> ready.          |
-//|   2. Order Block (OB): last opposing candle before a break of    |
-//|      structure; entry on the retrace into that candle's range.   |
-//|   3. Fair Value Gap (FVG): standalone unfilled 3-candle          |
-//|      imbalance; entry on the retrace into the gap.               |
-//|   4. Breaker Block (BRK): the order block of a failed sweep that |
-//|      flipped with structure; entry on the retest.               |
-//|   5. Turtle Soup (TS): false breakout of the prior N-bar range   |
-//|      extreme that closes back inside (a liquidity grab).         |
-//|   6. Optimal Trade Entry (OTE): the 0.62-0.79 fib retracement    |
-//|      zone of the most recent impulse leg.                        |
-//|   7. Continuation Retest (CONT): a swing level price already     |
-//|      broke through, retested from the breakout side -- a trend-  |
-//|      continuation entry (the only non-reversal of the seven).    |
+//|  THREE strategies, each long & short. All three share ONE        |
+//|  ordered sequence -- a liquidity SWEEP, then a Break Of Structure |
+//|  (BOS) in the opposite direction -- and differ only in WHICH zone |
+//|  price retests for the entry:                                     |
+//|   1. FVG  (Sweep -> BOS -> FVG): entry in the fair value gap left |
+//|      inside the BOS impulse leg, in the new bias direction.       |
+//|   2. IFVG (Sweep -> BOS -> Inversion FVG): an opposing FVG that   |
+//|      the BOS move CLOSED THROUGH (inverted); entry on the retest  |
+//|      of that flipped zone.                                        |
+//|   3. BRK  (Sweep -> BOS -> Breaker Block): the opposing order     |
+//|      block that the BOS move VIOLATED (closed through) and        |
+//|      flipped; entry on the retest of that breaker.                |
+//|                                                                  |
+//|  The Sweep -> BOS sequence is MANDATORY for all three: a zone     |
+//|  with no sweep+BOS in front of it is never reported. Each setup   |
+//|  is "forming" until price retraces into the zone, then "ready".   |
 //|                                                                  |
 //|  Stop loss sits beyond the structure (sweep extreme / zone edge /|
 //|  swing); take profit is the next external liquidity (draw on     |
@@ -77,13 +76,9 @@ input double          InpSweepBufferPoints    = 20;          // Stop buffer + zo
 input double          InpFallbackRR           = 2.0;         // Reward:Risk used when no liquidity target is found
 
 input group "=== Strategy toggles ==="
-input bool   InpEnableSweep   = true;   // 1. Liquidity Sweep + MSS
-input bool   InpEnableOB      = true;   // 2. Order Block
-input bool   InpEnableFVG     = true;   // 3. Fair Value Gap (standalone)
-input bool   InpEnableBreaker = true;   // 4. Breaker Block
-input bool   InpEnableTurtle  = true;   // 5. Turtle Soup
-input bool   InpEnableOTE     = true;   // 6. Optimal Trade Entry
-input bool   InpEnableCont    = true;   // 7. Continuation Retest
+input bool   InpEnableFVG     = true;   // 1. Sweep -> BOS -> FVG
+input bool   InpEnableIFVG    = true;   // 2. Sweep -> BOS -> Inversion FVG
+input bool   InpEnableBreaker = true;   // 3. Sweep -> BOS -> Breaker Block
 
 input group "=== Trading ==="
 input bool   InpAutoTrade         = false;   // false = scan/draw only (NO orders). true = trade the best ready setup
@@ -119,10 +114,8 @@ input int    InpMaxHistoricalPerSetup  = 5;   // Cap historical drawings per str
 input color  InpColorHistBull          = clrDeepSkyBlue; // Historical bullish setup color (more saturated than live -- outline-only needs the contrast)
 input color  InpColorHistBear          = clrMagenta;     // Historical bearish setup color
 
-//--- constants (mirror ict.py) ----------------------------------------
-#define FVG_SCAN_BARS    60   // how far back a standalone FVG may be and still count
-#define TURTLE_LOOKBACK  20   // range window for the turtle-soup false-break check
-#define NUM_STRATEGIES    7
+//--- constants --------------------------------------------------------
+#define NUM_STRATEGIES    3
 #define NUM_SLOTS        (NUM_STRATEGIES * 2)
 
 #define OBJ_PREFIX  "ICTS_"
@@ -132,11 +125,11 @@ input color  InpColorHistBear          = clrMagenta;     // Historical bearish s
 struct IctSetup
   {
    bool     valid;
-   int      stratNum;     // 0..6, index into the STRATEGIES order
-   string   shortCode;    // "SWEEP","OB","FVG","BRK","TS","OTE","CONT"
+   int      stratNum;     // 0..2, index into the STRATEGIES order
+   string   shortCode;    // "FVG","IFVG","BRK"
    string   fullName;     // human-readable strategy name
    bool     bullish;
-   string   stage;        // "ready" / "forming" / "sweep_only" / "mss_confirmed"
+   string   stage;        // "ready" (price in the zone now) / "forming" (waiting for retrace)
    bool     tested;       // price already revisited the zone/level since it formed
    bool     isZone;       // true = rectangle zone, false = single horizontal level
    double   zoneHigh;
@@ -167,13 +160,9 @@ string ShortCode(int n)
   {
    switch(n)
      {
-      case 0: return "SWEEP";
-      case 1: return "OB";
-      case 2: return "FVG";
-      case 3: return "BRK";
-      case 4: return "TS";
-      case 5: return "OTE";
-      case 6: return "CONT";
+      case 0: return "FVG";
+      case 1: return "IFVG";
+      case 2: return "BRK";
      }
    return "?";
   }
@@ -181,13 +170,9 @@ string FullName(int n)
   {
    switch(n)
      {
-      case 0: return "Liquidity Sweep+MSS";
-      case 1: return "Order Block";
-      case 2: return "Fair Value Gap";
-      case 3: return "Breaker Block";
-      case 4: return "Turtle Soup";
-      case 5: return "Optimal Trade Entry";
-      case 6: return "Continuation Retest";
+      case 0: return "Sweep+BOS+FVG";
+      case 1: return "Sweep+BOS+Inversion FVG";
+      case 2: return "Sweep+BOS+Breaker Block";
      }
    return "?";
   }
@@ -195,13 +180,9 @@ bool StrategyEnabled(int n)
   {
    switch(n)
      {
-      case 0: return InpEnableSweep;
-      case 1: return InpEnableOB;
-      case 2: return InpEnableFVG;
-      case 3: return InpEnableBreaker;
-      case 4: return InpEnableTurtle;
-      case 5: return InpEnableOTE;
-      case 6: return InpEnableCont;
+      case 0: return InpEnableFVG;
+      case 1: return InpEnableIFVG;
+      case 2: return InpEnableBreaker;
      }
    return false;
   }
@@ -329,13 +310,9 @@ bool RunDetector(int n, bool bull, const MqlRates &r[], int total, IctSetup &o)
   {
    switch(n)
      {
-      case 0: return Detect_SweepMSS(r, total, bull, o);
-      case 1: return Detect_OrderBlock(r, total, bull, o);
-      case 2: return Detect_FVG(r, total, bull, o);
-      case 3: return Detect_Breaker(r, total, bull, o);
-      case 4: return Detect_TurtleSoup(r, total, bull, o);
-      case 5: return Detect_OTE(r, total, bull, o);
-      case 6: return Detect_Continuation(r, total, bull, o);
+      case 0: return Detect_FVG(r, total, bull, o);
+      case 1: return Detect_IFVG(r, total, bull, o);
+      case 2: return Detect_Breaker(r, total, bull, o);
      }
    return false;
   }
@@ -482,7 +459,9 @@ int TimeToIndex(const MqlRates &r[], int total, datetime t)
   }
 
 //+------------------------------------------------------------------+
-//| Strategy 1: Liquidity Sweep -> MSS -> FVG (stages: swept/mss/ready)|
+//| SHARED SEQUENCE GATE: liquidity Sweep -> Break Of Structure (BOS) |
+//| Every one of the three strategies is built on top of this gate;   |
+//| the only difference between them is the retest zone it feeds.     |
 //+------------------------------------------------------------------+
 bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweepIdx, double &sweepPrice, double &liquidityLevel, datetime &liquidityTime)
   {
@@ -547,303 +526,207 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
    return false;
   }
 
-void ComputeEntrySL_Sweep(bool bullish, double fvgHigh, double fvgLow, double sweepExtreme, double &entry, double &sl)
+//+------------------------------------------------------------------+
+//| The mandatory Sweep -> BOS gate. Returns the sweep extreme (for   |
+//| the stop) and the BOS bar/level. All three detectors call this    |
+//| first and bail out if the full sequence isn't present.            |
+//+------------------------------------------------------------------+
+bool FindSweepBOS(const MqlRates &r[], int total, bool bullish,
+                  int &sweepIdx, double &sweepExtreme,
+                  int &bosIdx, double &bosLevel, datetime &liqTime)
   {
-   double point = g_symbol.Point();
-   entry = bullish
-           ? (InpEntryAtMidpoint ? (fvgHigh + fvgLow) / 2.0 : fvgLow)
-           : (InpEntryAtMidpoint ? (fvgHigh + fvgLow) / 2.0 : fvgHigh);
-   sl = bullish ? sweepExtreme - InpSweepBufferPoints * point
-                : sweepExtreme + InpSweepBufferPoints * point;
-  }
-
-bool Detect_SweepMSS(const MqlRates &r[], int total, bool bullish, IctSetup &o)
-  {
-   int sweepIdx; double sweepPrice, liqLevel; datetime liqTime;
+   double sweepPrice, liqLevel;
    if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
       return false;
    if(sweepIdx > InpMaxBarsAfterSweep)
       return false;
-
-   FillSetupCommon(o, 0, bullish);
-   o.isZone = false; o.stage = "sweep_only"; o.tested = false; o.hasTrade = false;
-   o.zoneHigh = liqLevel; o.zoneLow = liqLevel; o.zoneTime = liqTime;
+   sweepExtreme = sweepPrice;
 
    int mssIdx; double mssLevel;
    if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel))
-      return true; // stays at sweep_only
+      return false;
+   bosIdx = mssIdx; bosLevel = mssLevel;
+   return true;                                  // sweep older than BOS (bosIdx < sweepIdx)
+  }
 
-   o.stage = "mss_confirmed";
-   o.zoneHigh = mssLevel; o.zoneLow = mssLevel; o.zoneTime = r[mssIdx].time;
-
-   double fvgHigh, fvgLow; datetime ftl, ftr;
-   if(!FindEntryFVG(r, sweepIdx, mssIdx, bullish, fvgHigh, fvgLow, ftl, ftr))
-      return true; // stays at mss_confirmed
-
-   o.stage = "ready"; o.isZone = true;
-   o.zoneHigh = fvgHigh; o.zoneLow = fvgLow; o.zoneTime = ftl;
-   int fvgIdx = TimeToIndex(r, total, ftr);
-   if(fvgIdx < 0) fvgIdx = 0;
-   o.tested = ZoneTested(r, fvgIdx, fvgLow, fvgHigh);
-
-   double entry, sl;
-   ComputeEntrySL_Sweep(bullish, fvgHigh, fvgLow, sweepPrice, entry, sl);
+//+------------------------------------------------------------------+
+//| Shared entry/SL/TP for a retest zone. Entry at the 50% (or far    |
+//| edge); stop beyond the sweep extreme that triggered the setup;    |
+//| target the next external liquidity (or InpFallbackRR).            |
+//+------------------------------------------------------------------+
+void ComputeZoneTrade(const MqlRates &r[], int total, bool bullish,
+                      double zoneHi, double zoneLo, double sweepExtreme,
+                      double &entry, double &sl, double &tp)
+  {
+   double pt = g_symbol.Point();
+   entry = InpEntryAtMidpoint ? (zoneHi + zoneLo) / 2.0
+                              : (bullish ? zoneLo : zoneHi);
+   sl = bullish ? sweepExtreme - InpSweepBufferPoints * pt
+                : sweepExtreme + InpSweepBufferPoints * pt;
    double slDist = MathAbs(entry - sl);
-   double tp, tgt;
-   if(FindLiquidityTarget(r, total, bullish, entry, tgt))  tp = tgt;
+   double tgt;
+   if(FindLiquidityTarget(r, total, bullish, entry, tgt)) tp = tgt;
    else tp = bullish ? entry + slDist * InpFallbackRR : entry - slDist * InpFallbackRR;
-
-   SetTrade(o, entry, sl, tp);
-   return true;
   }
 
 //+------------------------------------------------------------------+
-//| Strategy 2: Order Block                                           |
+//| Inversion FVG: an OPPOSING-direction fair value gap that the BOS  |
+//| move closed completely through, flipping its polarity. Searches   |
+//| the leg around the sweep and returns the flipped zone plus the    |
+//| bar at which the inversion happened (so "tested" only counts a    |
+//| retest AFTER the flip, not the close-through itself).             |
 //+------------------------------------------------------------------+
-bool Detect_OrderBlock(const MqlRates &r[], int total, bool bullish, IctSetup &o)
+bool FindInversionFVG(const MqlRates &r[], int total, bool bullish, int bosIdx, int sweepIdx,
+                      double &zoneHi, double &zoneLo, datetime &tLeft, datetime &tRight, int &invIdx)
   {
-   double pt = g_symbol.Point();
-   double zoneLo, zoneHi, entry, sl, tp, tgt;
-   int ob = -1;
+   double minSize = InpMinFVGSizePoints * g_symbol.Point();
+   int hiLimit = MathMin(sweepIdx + InpMaxBarsForFVGSearch, total - 2);
 
-   if(bullish)
+   for(int i = bosIdx + 1; i <= hiLimit; i++)
      {
-      int sh = RecentSwing(r, total, true);
-      if(sh < 0) return false;
-      double level = r[sh].high;
-      int brk = -1;
-      for(int b = sh - 1; b >= 0; b--) if(r[b].close > level) { brk = b; break; }
-      if(brk < 0) return false;
-      int hi = MathMin(sh + 2, total);
-      for(int oo = brk + 1; oo < hi; oo++) if(r[oo].close < r[oo].open) { ob = oo; break; }
-      if(ob < 0) return false;
-      zoneLo = r[ob].low; zoneHi = r[ob].high;
-      entry = (zoneLo + zoneHi) / 2.0; sl = zoneLo - InpSweepBufferPoints * pt;
-      if(FindLiquidityTarget(r, total, true, entry, tgt)) tp = tgt; else tp = entry + MathAbs(entry - sl) * InpFallbackRR;
-     }
-   else
-     {
-      int slw = RecentSwing(r, total, false);
-      if(slw < 0) return false;
-      double level = r[slw].low;
-      int brk = -1;
-      for(int b = slw - 1; b >= 0; b--) if(r[b].close < level) { brk = b; break; }
-      if(brk < 0) return false;
-      int hi = MathMin(slw + 2, total);
-      for(int oo = brk + 1; oo < hi; oo++) if(r[oo].close > r[oo].open) { ob = oo; break; }
-      if(ob < 0) return false;
-      zoneLo = r[ob].low; zoneHi = r[ob].high;
-      entry = (zoneLo + zoneHi) / 2.0; sl = zoneHi + InpSweepBufferPoints * pt;
-      if(FindLiquidityTarget(r, total, false, entry, tgt)) tp = tgt; else tp = entry - MathAbs(entry - sl) * InpFallbackRR;
-     }
-
-   FillSetupCommon(o, 1, bullish);
-   o.isZone = true; o.zoneHigh = zoneHi; o.zoneLow = zoneLo; o.zoneTime = r[ob].time;
-   o.stage = StageFromZone(r, zoneLo, zoneHi); o.tested = ZoneTested(r, ob, zoneLo, zoneHi);
-   SetTrade(o, entry, sl, tp);
-   return true;
-  }
-
-//+------------------------------------------------------------------+
-//| Strategy 3: standalone Fair Value Gap                             |
-//+------------------------------------------------------------------+
-bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
-  {
-   double pt = g_symbol.Point();
-   double minSize = InpMinFVGSizePoints * pt;
-   double price = r[0].close;
-   double buf = InpSweepBufferPoints * pt;
-   int lim = MathMin(total - 1, FVG_SCAN_BARS);
-
-   for(int i = 1; i < lim; i++)
-     {
-      double olderHigh = r[i + 1].high, olderLow = r[i + 1].low;
-      double newerHigh = r[i - 1].high, newerLow = r[i - 1].low;
-      double zoneLo, zoneHi, entry, sl, tp, tgt;
+      if(i - 1 < 0 || i + 1 >= total)
+         continue;
 
       if(bullish)
         {
-         if(newerLow - olderHigh < minSize) continue;
-         zoneLo = olderHigh; zoneHi = newerLow;
-         if(price < zoneLo - buf) continue;
-         entry = (zoneLo + zoneHi) / 2.0; sl = zoneLo - InpSweepBufferPoints * pt;
-         if(FindLiquidityTarget(r, total, true, entry, tgt)) tp = tgt; else tp = entry + MathAbs(entry - sl) * InpFallbackRR;
+         // bullish setup -> the inverted zone is a BEARISH (down) FVG that
+         // price later closed back ABOVE, flipping it to support.
+         double gTop = r[i + 1].low;    // older low  = top of the down-gap
+         double gBot = r[i - 1].high;   // newer high = bottom of the down-gap
+         if(gTop - gBot < minSize)
+            continue;
+         int flip = -1;
+         for(int j = i - 1; j >= 0; j--) if(r[j].close > gTop) { flip = j; break; }
+         if(flip < 0)
+            continue;
+         zoneLo = gBot; zoneHi = gTop;
+         tLeft = r[i + 1].time; tRight = r[i - 1].time; invIdx = flip;
+         return true;
         }
       else
         {
-         if(olderLow - newerHigh < minSize) continue;
-         zoneLo = newerHigh; zoneHi = olderLow;
-         if(price > zoneHi + buf) continue;
-         entry = (zoneLo + zoneHi) / 2.0; sl = zoneHi + InpSweepBufferPoints * pt;
-         if(FindLiquidityTarget(r, total, false, entry, tgt)) tp = tgt; else tp = entry - MathAbs(entry - sl) * InpFallbackRR;
+         // bearish setup -> the inverted zone is a BULLISH (up) FVG that
+         // price later closed back BELOW, flipping it to resistance.
+         double gBot = r[i + 1].high;   // older high = bottom of the up-gap
+         double gTop = r[i - 1].low;    // newer low  = top of the up-gap
+         if(gTop - gBot < minSize)
+            continue;
+         int flip = -1;
+         for(int j = i - 1; j >= 0; j--) if(r[j].close < gBot) { flip = j; break; }
+         if(flip < 0)
+            continue;
+         zoneLo = gBot; zoneHi = gTop;
+         tLeft = r[i + 1].time; tRight = r[i - 1].time; invIdx = flip;
+         return true;
         }
-
-      FillSetupCommon(o, 2, bullish);
-      o.isZone = true; o.zoneHigh = zoneHi; o.zoneLow = zoneLo; o.zoneTime = r[i + 1].time;
-      o.stage = StageFromZone(r, zoneLo, zoneHi); o.tested = ZoneTested(r, i - 1, zoneLo, zoneHi);
-      SetTrade(o, entry, sl, tp);
-      return true;
      }
    return false;
   }
 
 //+------------------------------------------------------------------+
-//| Strategy 4: Breaker Block                                         |
+//| Strategy 1: Sweep -> BOS -> FVG                                   |
+//| Entry in the fair value gap left inside the BOS impulse leg, in   |
+//| the new bias direction. (Detect_FVG)                             |
+//+------------------------------------------------------------------+
+bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
+  {
+   int sweepIdx, bosIdx; double sweepExtreme, bosLevel; datetime liqTime;
+   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, bosIdx, bosLevel, liqTime))
+      return false;
+
+   double fvgHigh, fvgLow; datetime ftl, ftr;
+   if(!FindEntryFVG(r, sweepIdx, bosIdx, bullish, fvgHigh, fvgLow, ftl, ftr))
+      return false;
+
+   FillSetupCommon(o, 0, bullish);
+   o.isZone = true; o.zoneHigh = fvgHigh; o.zoneLow = fvgLow; o.zoneTime = ftl;
+   int fvgIdx = TimeToIndex(r, total, ftr);
+   if(fvgIdx < 0) fvgIdx = 0;
+   o.stage  = StageFromZone(r, fvgLow, fvgHigh);
+   o.tested = ZoneTested(r, fvgIdx, fvgLow, fvgHigh);
+
+   double entry, sl, tp;
+   ComputeZoneTrade(r, total, bullish, fvgHigh, fvgLow, sweepExtreme, entry, sl, tp);
+   SetTrade(o, entry, sl, tp);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Strategy 2: Sweep -> BOS -> Inversion FVG                         |
+//| An opposing FVG the BOS move closed through (flipped); entry on   |
+//| the retest of that inverted zone. (Detect_IFVG)                  |
+//+------------------------------------------------------------------+
+bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
+  {
+   int sweepIdx, bosIdx; double sweepExtreme, bosLevel; datetime liqTime;
+   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, bosIdx, bosLevel, liqTime))
+      return false;
+
+   double zHi, zLo; datetime tl, tr; int invIdx;
+   if(!FindInversionFVG(r, total, bullish, bosIdx, sweepIdx, zHi, zLo, tl, tr, invIdx))
+      return false;
+
+   FillSetupCommon(o, 1, bullish);
+   o.isZone = true; o.zoneHigh = zHi; o.zoneLow = zLo; o.zoneTime = tl;
+   o.stage  = StageFromZone(r, zLo, zHi);
+   o.tested = ZoneTested(r, invIdx, zLo, zHi);   // "tested" = a retest AFTER the inversion
+
+   double entry, sl, tp;
+   ComputeZoneTrade(r, total, bullish, zHi, zLo, sweepExtreme, entry, sl, tp);
+   SetTrade(o, entry, sl, tp);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Strategy 3: Sweep -> BOS -> Breaker Block                        |
+//| The opposing order block the BOS move violated (closed through)   |
+//| and flipped; entry on the retest of that breaker. (Detect_Breaker)|
 //+------------------------------------------------------------------+
 bool Detect_Breaker(const MqlRates &r[], int total, bool bullish, IctSetup &o)
   {
-   double pt = g_symbol.Point();
-   int sweepIdx; double sweepPrice, liqLevel; datetime liqTime;
-   if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
+   int sweepIdx, bosIdx; double sweepExtreme, bosLevel; datetime liqTime;
+   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, bosIdx, bosLevel, liqTime))
       return false;
-   if(sweepIdx > InpMaxBarsAfterSweep)
-      return false;
-   int mssIdx; double mssLevel;
-   if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel))
-      return false;
-   int loI = mssIdx + 1, hiI = sweepIdx;
+
+   int loI = bosIdx + 1, hiI = sweepIdx;          // the leg that built the swept extreme
    if(loI > hiI) return false;
 
+   // The breaker is the OPPOSING order block inside that leg: for a bullish
+   // setup it's the lowest down-candle; for a bearish setup the highest
+   // up-candle. That candle pushed price into the liquidity that got swept.
    int ob = -1;
-   double zoneLo, zoneHi, entry, sl, tp, tgt;
    if(bullish)
      {
       double best = DBL_MAX;
-      for(int oo = loI; oo <= hiI; oo++) if(r[oo].close < r[oo].open && r[oo].low < best) { best = r[oo].low; ob = oo; }
-      if(ob < 0) return false;
-      zoneLo = r[ob].low; zoneHi = r[ob].high;
-      entry = (zoneLo + zoneHi) / 2.0; sl = zoneLo - InpSweepBufferPoints * pt;
-      if(FindLiquidityTarget(r, total, true, entry, tgt)) tp = tgt; else tp = entry + MathAbs(entry - sl) * InpFallbackRR;
+      for(int oo = loI; oo <= hiI; oo++)
+         if(r[oo].close < r[oo].open && r[oo].low < best) { best = r[oo].low; ob = oo; }
      }
    else
      {
       double best = -DBL_MAX;
-      for(int oo = loI; oo <= hiI; oo++) if(r[oo].close > r[oo].open && r[oo].high > best) { best = r[oo].high; ob = oo; }
-      if(ob < 0) return false;
-      zoneLo = r[ob].low; zoneHi = r[ob].high;
-      entry = (zoneLo + zoneHi) / 2.0; sl = zoneHi + InpSweepBufferPoints * pt;
-      if(FindLiquidityTarget(r, total, false, entry, tgt)) tp = tgt; else tp = entry - MathAbs(entry - sl) * InpFallbackRR;
+      for(int oo = loI; oo <= hiI; oo++)
+         if(r[oo].close > r[oo].open && r[oo].high > best) { best = r[oo].high; ob = oo; }
      }
+   if(ob < 0) return false;
 
-   FillSetupCommon(o, 3, bullish);
+   // It only becomes a BREAKER once the OB has been VIOLATED -- a later candle
+   // must have CLOSED through it in the BOS direction. That flip is the setup.
+   int flip = -1;
+   for(int j = ob - 1; j >= 0; j--)
+     {
+      if(bullish  && r[j].close > r[ob].high) { flip = j; break; }
+      if(!bullish && r[j].close < r[ob].low ) { flip = j; break; }
+     }
+   if(flip < 0) return false;
+
+   double zoneLo = r[ob].low, zoneHi = r[ob].high;
+   FillSetupCommon(o, 2, bullish);
    o.isZone = true; o.zoneHigh = zoneHi; o.zoneLow = zoneLo; o.zoneTime = r[ob].time;
-   o.stage = StageFromZone(r, zoneLo, zoneHi); o.tested = ZoneTested(r, ob, zoneLo, zoneHi);
-   SetTrade(o, entry, sl, tp);
-   return true;
-  }
+   o.stage  = StageFromZone(r, zoneLo, zoneHi);
+   o.tested = ZoneTested(r, flip, zoneLo, zoneHi); // "tested" = a retest AFTER the violation
 
-//+------------------------------------------------------------------+
-//| Strategy 5: Turtle Soup (false break of the prior N-bar range)    |
-//+------------------------------------------------------------------+
-bool Detect_TurtleSoup(const MqlRates &r[], int total, bool bullish, IctSetup &o)
-  {
-   double pt = g_symbol.Point();
-   int k = InpSwingLeftRight;
-   if(total < TURTLE_LOOKBACK + 4)
-      return false;
-
-   for(int i = 0; i < k + 3; i++)
-     {
-      if(i + 1 + TURTLE_LOOKBACK > total)
-         break;
-      double winHi = -DBL_MAX, winLo = DBL_MAX;
-      for(int j = i + 1; j < i + 1 + TURTLE_LOOKBACK; j++)
-        {
-         if(r[j].high > winHi) winHi = r[j].high;
-         if(r[j].low  < winLo) winLo = r[j].low;
-        }
-      double entry, sl, tp; bool ok = false;
-      if(bullish && r[i].low < winLo && r[i].close > winLo)        { entry = r[i].close; sl = r[i].low - InpSweepBufferPoints * pt;  tp = winHi; ok = true; }
-      else if(!bullish && r[i].high > winHi && r[i].close < winHi) { entry = r[i].close; sl = r[i].high + InpSweepBufferPoints * pt; tp = winLo; ok = true; }
-      if(!ok)
-         continue;
-
-      double ext = bullish ? r[i].low : r[i].high;
-      FillSetupCommon(o, 4, bullish);
-      o.isZone = false; o.zoneHigh = ext; o.zoneLow = ext; o.zoneTime = r[i].time;
-      o.stage = (i <= 2) ? "ready" : "forming";
-      o.tested = ZoneTested(r, i, ext, ext);
-      SetTrade(o, entry, sl, tp);
-      return true;
-     }
-   return false;
-  }
-
-//+------------------------------------------------------------------+
-//| Strategy 6: Optimal Trade Entry (0.62-0.79 fib of the impulse)    |
-//+------------------------------------------------------------------+
-bool Detect_OTE(const MqlRates &r[], int total, bool bullish, IctSetup &o)
-  {
-   double pt = g_symbol.Point();
-   int sh = RecentSwing(r, total, true);
-   int slw = RecentSwing(r, total, false);
-   if(sh < 0 || slw < 0)
-      return false;
-
-   double zHi, zLo, entry, sl, tp;
-   if(bullish)
-     {
-      if(!(slw > sh)) return false;             // up leg: low older than high
-      double legLow = r[slw].low, legHigh = r[sh].high;
-      double rng = legHigh - legLow; if(rng <= 0) return false;
-      zHi = legHigh - 0.62 * rng; zLo = legHigh - 0.79 * rng;
-      entry = (zHi + zLo) / 2.0; sl = legLow - InpSweepBufferPoints * pt; tp = legHigh;
-     }
-   else
-     {
-      if(!(sh > slw)) return false;             // down leg: high older than low
-      double legHigh = r[sh].high, legLow = r[slw].low;
-      double rng = legHigh - legLow; if(rng <= 0) return false;
-      zLo = legLow + 0.62 * rng; zHi = legLow + 0.79 * rng;
-      entry = (zHi + zLo) / 2.0; sl = legHigh + InpSweepBufferPoints * pt; tp = legLow;
-     }
-
-   int refIdx = bullish ? sh : slw;
-   FillSetupCommon(o, 5, bullish);
-   o.isZone = true; o.zoneHigh = zHi; o.zoneLow = zLo; o.zoneTime = r[refIdx].time;
-   o.stage = StageFromZone(r, zLo, zHi); o.tested = ZoneTested(r, refIdx, zLo, zHi);
-   SetTrade(o, entry, sl, tp);
-   return true;
-  }
-
-//+------------------------------------------------------------------+
-//| Strategy 7: Continuation Retest (break of a swing, retested)      |
-//+------------------------------------------------------------------+
-bool Detect_Continuation(const MqlRates &r[], int total, bool bullish, IctSetup &o)
-  {
-   double pt = g_symbol.Point();
-   double price = r[0].close;
-   double buf = InpSweepBufferPoints * pt;
-   double invalidation = buf * 3;
-   double level, entry, sl, tp, tgt;
-   int swingIdx = -1, brk = -1;
-
-   if(bullish)
-     {
-      int sh = RecentSwing(r, total, true);
-      if(sh < 0) return false;
-      swingIdx = sh; level = r[sh].high;
-      for(int b = sh - 1; b >= 0; b--) if(r[b].close > level) { brk = b; break; }
-      if(brk < 0 || brk > InpMaxBarsAfterSweep) return false;
-      if(price < level - invalidation) return false;
-      entry = level; sl = level - invalidation;
-      if(FindLiquidityTarget(r, total, true, entry, tgt)) tp = tgt; else tp = entry + MathAbs(entry - sl) * InpFallbackRR;
-     }
-   else
-     {
-      int slw = RecentSwing(r, total, false);
-      if(slw < 0) return false;
-      swingIdx = slw; level = r[slw].low;
-      for(int b = slw - 1; b >= 0; b--) if(r[b].close < level) { brk = b; break; }
-      if(brk < 0 || brk > InpMaxBarsAfterSweep) return false;
-      if(price > level + invalidation) return false;
-      entry = level; sl = level + invalidation;
-      if(FindLiquidityTarget(r, total, false, entry, tgt)) tp = tgt; else tp = entry - MathAbs(entry - sl) * InpFallbackRR;
-     }
-
-   FillSetupCommon(o, 6, bullish);
-   o.isZone = false; o.zoneHigh = level; o.zoneLow = level; o.zoneTime = r[swingIdx].time;
-   o.stage = StageFromZone(r, level, level); o.tested = ZoneTested(r, brk, level, level);
+   double entry, sl, tp;
+   ComputeZoneTrade(r, total, bullish, zoneHi, zoneLo, sweepExtreme, entry, sl, tp);
    SetTrade(o, entry, sl, tp);
    return true;
   }
@@ -1225,9 +1108,9 @@ void EnsureDashboardObjects()
       return;
 
    int x = 10, y = 20, w = 330, rowH = 16;
-   // Title, Mode, TF, Bias, 7 strategy rows, Acct, Pos, Spread
+   // Title, Mode, TF, Bias, Ctx, 3 strategy rows, Acct, Pos, Spread, Hist
    string rows[] = {"Title","Mode","TF","Bias","Ctx",
-                    "S0","S1","S2","S3","S4","S5","S6",
+                    "S0","S1","S2",
                     "Acct","Pos","Spread","Hist"};
 
    ObjectCreate(0, DASH_PREFIX + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
@@ -1271,8 +1154,6 @@ string StageShort(string stage)
   {
    if(stage == "ready")         return "READY";
    if(stage == "forming")       return "form";
-   if(stage == "sweep_only")    return "swept";
-   if(stage == "mss_confirmed") return "mss";
    return "-";
   }
 
@@ -1315,7 +1196,7 @@ void UpdateDashboard()
       posPnL  += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
      }
 
-   SetDashLine("Title", "=== MMBM ICT Suite (7 strategies) ===", clrYellow);
+   SetDashLine("Title", "=== MMBM ICT Suite (3 strategies) ===", clrYellow);
    SetDashLine("Mode",  "Mode: " + (InpAutoTrade ? ("AUTO-TRADE (" + (InpTriggerMode == TRIGGER_TOUCH ? "touch" : "close") + ")") : "SCAN ONLY"),
                InpAutoTrade ? clrLimeGreen : clrOrange);
    SetDashLine("TF",    "Chart: " + EnumToString((ENUM_TIMEFRAMES)_Period) + (tfMatch ? "  [OK]" : "  [MISMATCH-drawings hidden]"),

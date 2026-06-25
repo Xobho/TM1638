@@ -197,33 +197,44 @@ is financial advice.
 
 ---
 
-# MMBM ICT Suite EA (7 strategies)
+# MMBM ICT Suite EA (3 strategies)
 
 File: [`MMBM_ICT_Suite_EA.mq5`](MMBM_ICT_Suite_EA.mq5)
 
 The single-strategy EA above implements one play (sweep → MSS → FVG) with a
-full pending-order state machine and history scan. The **Suite EA** is the
-chart counterpart of the Python bridge's `ict.py`: it evaluates a whole
-**suite of seven ICT strategies** every new bar, for both directions, draws
-each detected setup live, and can optionally trade the best "ready" one. It's
-a deliberately simpler *detect-and-draw-per-bar* design (no per-strategy
+full pending-order state machine and history scan. The **Suite EA** evaluates
+**three ICT strategies** every new bar, for both directions, draws each
+detected setup live, and can optionally trade the best "ready" one. It's a
+deliberately simple *detect-and-draw-per-bar* design (no per-strategy
 pending-order lifecycle), so it's easy to read and tune as you go.
 
-## The seven strategies
+## The shared sequence: Sweep → BOS → retest
 
-| Code | Strategy | Entry idea |
+All three strategies are built on **one mandatory ordered sequence** and
+differ only in *which zone* price retests for the entry:
+
+1. **Sweep** — a wick raids liquidity beyond a swing (a stop hunt) and closes
+   back inside. The stop loss sits just beyond this sweep extreme.
+2. **BOS** — price then breaks structure in the *opposite* direction,
+   confirming the bias shift. This must come **after** the sweep.
+3. **Retest** — price pulls back into the entry zone; you enter in the BOS
+   direction, targeting the opposing liquidity.
+
+A zone with no sweep + BOS in front of it is **never** reported — that
+ordering is the whole point.
+
+## The three strategies
+
+| Code | Strategy | Entry zone (after Sweep → BOS) |
 |---|---|---|
-| `SWEEP` | Liquidity Sweep + MSS | Wick sweeps a swing & closes back inside → market-structure shift → entry in the impulse-leg FVG. Stages: swept → mss → ready |
-| `OB` | Order Block | Last opposing candle before a break of structure; retrace into it |
-| `FVG` | Fair Value Gap | Standalone unfilled 3-candle imbalance; retrace into the gap |
-| `BRK` | Breaker Block | Order block of a failed sweep that flipped with structure; retest |
-| `TS` | Turtle Soup | False breakout of the prior N-bar range extreme that closes back inside |
-| `OTE` | Optimal Trade Entry | The 0.62–0.79 fib retracement zone of the most recent impulse leg |
-| `CONT` | Continuation Retest | A broken swing level retested from the breakout side — a trend-*continuation* entry (the only non-reversal of the seven) |
+| `FVG` | Sweep → BOS → FVG | The fair value gap left inside the BOS impulse leg, in the new bias direction |
+| `IFVG` | Sweep → BOS → Inversion FVG | An *opposing* FVG that the BOS move closed completely through (flipped polarity); retest of that inverted zone |
+| `BRK` | Sweep → BOS → Breaker Block | The *opposing* order block that the BOS move violated (closed through) and flipped; retest of that breaker |
 
-Each strategy can be toggled independently (`InpEnableSweep`, `InpEnableOB`,
-…). All detection runs on `InpLTF_Timeframe`; HTF bias (`InpHTF_Timeframe`)
-gates which directions are shown exactly as in the single-strategy EA.
+Each strategy can be toggled independently (`InpEnableFVG`, `InpEnableIFVG`,
+`InpEnableBreaker`). All detection runs on `InpLTF_Timeframe`; HTF bias
+(`InpHTF_Timeframe`) gates which directions are shown exactly as in the
+single-strategy EA.
 
 Toggling a strategy (or any input) takes effect immediately — `OnInit` runs
 a full live rescan as soon as you click OK, rather than waiting for the next
@@ -233,26 +244,26 @@ new bar to repopulate the chart.
 
 Every setup carries two key attributes shown in its label and the dashboard:
 
-- **stage**: `ready` (price is in the zone / at the level *now* — actionable
-  on a market order) vs `forming` (structure is valid but price must still
-  retrace into it). `SWEEP` also shows its progression `swept` → `mss` →
-  `ready`.
+- **stage**: `ready` (price is in the zone *now* — actionable on a market
+  order) vs `forming` (the sweep → BOS structure is valid but price must still
+  retrace into the zone).
 - **tested**: `true` if price has already wicked back into the zone since it
-  formed (even without closing inside). A *tested* zone is a weaker, used-up
-  version of the setup — it's drawn with a dotted (rather than solid) outline,
-  and `InpSkipTestedSetups` (default on) keeps auto-trade from entering one.
+  formed (even without closing inside). For `IFVG` and `BRK`, "tested" only
+  counts a retest *after* the inversion/violation — the close-through that
+  creates the zone doesn't count against it. A *tested* zone is a weaker,
+  used-up version of the setup — it's drawn with a dotted (rather than solid)
+  outline, and `InpSkipTestedSetups` (default on) keeps auto-trade from
+  entering one.
 
 ## Chart visuals
 
 Drawings only render when the chart period matches `InpLTF_Timeframe` (same
 reason as the other EA — the objects are LTF-bar-sized). Each (strategy,
 direction) slot is redrawn each bar and named
-`ICTS_<CODE>_<B|S>_...`, so at most 14 setups show at once, replaced in place:
+`ICTS_<CODE>_<B|S>_...`, so at most 6 setups show at once, replaced in place:
 
-- **Filled rectangle** for zone strategies (`OB`/`FVG`/`BRK`/`OTE`/ready
-  `SWEEP`), bounded to the zone and extended `InpZoneExtendBars` to the right.
-- **Horizontal line** for level strategies (`TS`, `CONT`, and pre-ready
-  `SWEEP` stages).
+- **Filled rectangle** for the entry zone (`FVG`/`IFVG`/`BRK` are all zones),
+  bounded to the zone and extended `InpZoneExtendBars` to the right.
 - A **label** with the strategy code, stage, `(tested)`, and reward:risk.
 - **Entry / SL / TP lines** — only for `ready`, actionable setups (toggle with
   `InpDrawTradeLines`) to keep the chart readable.
@@ -263,7 +274,7 @@ Bullish setups use `InpColorBull`, bearish use `InpColorBear`.
 
 A top-left panel (`InpShowDashboard`) lists mode, chart/strategy TF match,
 HTF bias, then **one row per strategy** showing each direction's live state
-(e.g. `OB  B READY*  S form` — the `*` marks tested), plus account equity,
+(e.g. `FVG  B READY*  S form` — the `*` marks tested), plus account equity,
 open positions for this EA, and spread.
 
 ## Trading
@@ -323,14 +334,14 @@ setups from before it was attached:
 
 - `InpHistoryDays` (default 5, `0` disables it) and `InpMaxHistoricalPerSetup`
   (default 5) control how far back to scan and how many historical finds to
-  draw per strategy+direction (14 slots total) — that cap, plus only drawing
-  the zone/level + a label (no entry/SL/TP lines), is what keeps the scan from
-  creating hundreds of objects across all seven strategies.
+  draw per strategy+direction (6 slots total) — that cap, plus only drawing
+  the zone + a label (no entry/SL/TP lines), is what keeps the scan from
+  creating hundreds of objects across all three strategies.
 - The scan runs **once**, in `OnInit` (on attach, or whenever you open Inputs
   and click OK — MT5 re-fires `OnInit` on any input change) — never per-tick,
   so it can't slow down live chart updates. It fetches the historical bars
   with a single `CopyRates` call, builds one descending copy of that range,
-  and then walks it bar-by-bar feeding each of the seven detectors a cheap
+  and then walks it bar-by-bar feeding each of the three detectors a cheap
   slice of that one array — no repeated history fetches per strategy.
   Only `stage == "ready"` finds are drawn, and a persisting setup (same zone,
   many consecutive "ready" bars) only counts once.
