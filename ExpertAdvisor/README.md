@@ -293,6 +293,29 @@ This is intentionally a simpler execution model than the other EA's pending
 limits — it's meant as a starting point to forward-test the suite on a demo
 and adjust. Backtest before risking real funds.
 
+### Context filters
+
+The trigger decides *when* to enter; these gates decide *whether a setup is
+eligible at all*. They sit on top of every strategy and stop the EA taking a
+pattern with no surrounding ICT context (e.g. a stop-hunt entry in the wrong
+half of the range, or in a dead session). Both are on by default:
+
+- **Premium / Discount** (`InpUsePremiumDiscount`): a dealing range is built
+  from the high/low of the last `InpPDRangeBars` bars (default 50); its 50%
+  is equilibrium. **Buys are only allowed at/below equilibrium (discount),
+  sells at/above (premium)** — the core ICT rule that you buy cheap and sell
+  expensive within the range. Setups that fail this are still drawn, just not
+  traded.
+- **Killzones** (`InpUseKillzones`): trades fire only inside two configurable
+  session windows — `InpKZ1StartHour..InpKZ1EndHour` (London) and
+  `InpKZ2StartHour..InpKZ2EndHour` (New York). **Hours are broker/SERVER
+  time**, not your local or EST time, so set them to match your broker (the
+  dashboard shows the current server time next to `KZ IN`/`KZ OUT` to help you
+  calibrate). End hour is exclusive; a window may wrap past midnight.
+
+The dashboard's `Ctx` line shows both at a glance, e.g.
+`Ctx: KZ IN 09:42 | Discount` (turns orange when the session is closed).
+
 ## Seeing history
 
 Like the single-strategy EA, this one can backfill the chart with completed

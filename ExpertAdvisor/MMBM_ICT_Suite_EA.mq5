@@ -93,6 +93,15 @@ input int    InpMaxSpreadPoints   = 30;      // Skip entries if spread exceeds t
 input bool   InpSkipTestedSetups  = true;    // Don't enter a zone that has already been tested once
 input ulong  InpMagicNumber       = 19380002; // Magic number for this EA's orders
 
+input group "=== Context filters (ICT) ==="
+input bool   InpUsePremiumDiscount = true;  // Only BUY in discount / SELL in premium of the dealing range
+input int    InpPDRangeBars        = 50;    // Bars defining the dealing range (high..low) for premium/discount
+input bool   InpUseKillzones       = true;  // Only trade inside the session windows below (broker/SERVER time)
+input int    InpKZ1StartHour       = 8;     // Killzone 1 (London) start hour, server time 0-23
+input int    InpKZ1EndHour         = 11;    // Killzone 1 (London) end hour, server time (exclusive)
+input int    InpKZ2StartHour       = 13;    // Killzone 2 (New York) start hour, server time 0-23
+input int    InpKZ2EndHour         = 16;    // Killzone 2 (New York) end hour, server time (exclusive)
+
 input group "=== Chart Visuals ==="
 input bool   InpShowDrawings      = true;          // Draw detected setups on the chart
 input bool   InpDrawTradeLines    = true;          // Draw entry/SL/TP lines for "ready" setups
@@ -149,6 +158,10 @@ bool          g_htfBearBias = true;
 
 IctSetup      g_slots[NUM_SLOTS];   // current detections, indexed by SlotIndex()
 bool          g_slotActive[NUM_SLOTS];
+
+// Dealing range for premium/discount, recomputed once per bar in ScanAllStrategies.
+double        g_pdHigh = 0.0, g_pdLow = 0.0, g_pdEquilibrium = 0.0;
+bool          g_pdValid = false;
 
 string ShortCode(int n)
   {
@@ -267,6 +280,7 @@ void OnTick()
 void ScanAllStrategies()
   {
    GetHTFBias(g_htfBullBias, g_htfBearBias);
+   ComputePremiumDiscount();
 
    MqlRates rates[];
    ArraySetAsSeries(rates, true);              // index 0 = newest, like ict.py's reversed series
@@ -859,10 +873,63 @@ void SetTrade(IctSetup &o, double entry, double sl, double tp)
   }
 
 //+------------------------------------------------------------------+
+//| Context filters (ICT): every entry must sit inside the right     |
+//| half of the dealing range and inside a trading session window.   |
+//+------------------------------------------------------------------+
+void ComputePremiumDiscount()
+  {
+   g_pdValid = false;
+   if(!InpUsePremiumDiscount)
+      return;
+   MqlRates rr[];
+   ArraySetAsSeries(rr, true);
+   int got = CopyRates(_Symbol, InpLTF_Timeframe, 1, InpPDRangeBars, rr);
+   if(got < 5)
+      return;
+   double hi = -DBL_MAX, lo = DBL_MAX;
+   for(int i = 0; i < got; i++)
+     {
+      if(rr[i].high > hi) hi = rr[i].high;
+      if(rr[i].low  < lo) lo = rr[i].low;
+     }
+   if(hi <= lo)
+      return;
+   g_pdHigh = hi; g_pdLow = lo;
+   g_pdEquilibrium = (hi + lo) / 2.0;
+   g_pdValid = true;
+  }
+
+// Buys must be at/below equilibrium (discount); sells at/above (premium).
+bool PremiumDiscountOK(const IctSetup &s)
+  {
+   if(!InpUsePremiumDiscount || !g_pdValid)
+      return true;
+   return s.bullish ? (s.entry <= g_pdEquilibrium) : (s.entry >= g_pdEquilibrium);
+  }
+
+bool HourInWindow(int h, int start, int end)
+  {
+   if(start == end)            return false;        // empty window
+   if(start < end)             return (h >= start && h < end);
+   return (h >= start || h < end);                  // window wraps past midnight
+  }
+
+bool KillzoneOK()
+  {
+   if(!InpUseKillzones)
+      return true;
+   MqlDateTime t;
+   TimeToStruct(TimeCurrent(), t);                  // server time
+   return HourInWindow(t.hour, InpKZ1StartHour, InpKZ1EndHour)
+       || HourInWindow(t.hour, InpKZ2StartHour, InpKZ2EndHour);
+  }
+
+//+------------------------------------------------------------------+
 //| Auto-trade: take the single best actionable setup, one at a time.|
 //| touchMode=false -> the closed candle must be inside the zone     |
 //|   (stage "ready"); touchMode=true -> live price (incl. a wick)   |
 //|   is currently inside the zone band.                             |
+//| Gated by premium/discount + killzone context filters.            |
 //| Selection: triggered + actionable, prefer untested, then top RR. |
 //+------------------------------------------------------------------+
 void TradeBestSetup(bool touchMode)
@@ -870,6 +937,8 @@ void TradeBestSetup(bool touchMode)
    if(PositionExistsForEA())
       return;
    if((int)g_symbol.Spread() > InpMaxSpreadPoints)
+      return;
+   if(!KillzoneOK())
       return;
 
    double buf = InpSweepBufferPoints * g_symbol.Point();
@@ -886,6 +955,7 @@ void TradeBestSetup(bool touchMode)
                        : (s.stage == "ready");
       if(!triggered) continue;
       if(InpSkipTestedSetups && s.tested) continue;
+      if(!PremiumDiscountOK(s)) continue;
       if(best < 0) { best = i; continue; }
       IctSetup b = g_slots[best];
       // prefer the untested one; if equal, prefer the higher reward:risk
@@ -1156,7 +1226,7 @@ void EnsureDashboardObjects()
 
    int x = 10, y = 20, w = 330, rowH = 16;
    // Title, Mode, TF, Bias, 7 strategy rows, Acct, Pos, Spread
-   string rows[] = {"Title","Mode","TF","Bias",
+   string rows[] = {"Title","Mode","TF","Bias","Ctx",
                     "S0","S1","S2","S3","S4","S5","S6",
                     "Acct","Pos","Spread","Hist"};
 
@@ -1251,6 +1321,22 @@ void UpdateDashboard()
    SetDashLine("TF",    "Chart: " + EnumToString((ENUM_TIMEFRAMES)_Period) + (tfMatch ? "  [OK]" : "  [MISMATCH-drawings hidden]"),
                tfMatch ? clrWhite : clrRed);
    SetDashLine("Bias",  "HTF bias: Buy " + (g_htfBullBias ? "OK" : "blk") + " | Sell " + (g_htfBearBias ? "OK" : "blk"), clrWhite);
+
+   // Context filters: killzone (server time) + where price sits in the range.
+   MqlDateTime tnow; TimeToStruct(TimeCurrent(), tnow);
+   bool kzOn = KillzoneOK();
+   string kzTxt = !InpUseKillzones ? "KZ off"
+                  : ((kzOn ? "KZ IN" : "KZ OUT") + StringFormat(" %02d:%02d", tnow.hour, tnow.min));
+   string pdTxt;
+   if(!InpUsePremiumDiscount)        pdTxt = "P/D off";
+   else if(!g_pdValid)               pdTxt = "P/D n/a";
+   else
+     {
+      double px = g_symbol.Bid();
+      pdTxt = (px > g_pdEquilibrium) ? "Premium" : "Discount";
+     }
+   color ctxCol = (InpUseKillzones && !kzOn) ? clrOrange : clrAqua;
+   SetDashLine("Ctx", "Ctx: " + kzTxt + " | " + pdTxt, ctxCol);
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
       SetDashLine("S" + IntegerToString(n), StrategyRowText(n), clrSilver);
