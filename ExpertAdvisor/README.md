@@ -296,7 +296,12 @@ setups from before it was attached:
 - Historical objects use the `ICTS_HIST_<CODE>_<B|S>_<n>_` prefix (vs.
   `ICTS_<CODE>_<B|S>_` for live ones) so the two never collide, and are drawn
   as an unfilled outline (dotted if `tested`) to stay visually distinct from
-  the live, filled zones.
+  the live, filled zones. Because there's no fill behind them, historical
+  zones use their own brighter colors — `InpColorHistBull` (default
+  `clrDeepSkyBlue`) and `InpColorHistBear` (default `clrMagenta`) — plus a
+  thicker line and slightly larger label than the live zones, which can
+  afford paler `InpColorBull`/`InpColorBear` colors since their fill carries
+  the contrast.
 - Like the live scanner, historical setups are **not** filtered by HTF bias
   and never place real orders — visual review only.
 

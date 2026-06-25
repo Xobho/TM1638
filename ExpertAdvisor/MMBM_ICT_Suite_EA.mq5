@@ -99,6 +99,8 @@ input color  InpColorTP           = clrLimeGreen;  // Take profit line color
 input group "=== History ==="
 input int    InpHistoryDays            = 5;   // Scan and draw completed "ready" setups from the past N days (0 = off)
 input int    InpMaxHistoricalPerSetup  = 5;   // Cap historical drawings per strategy+direction (bounds scan time & object count)
+input color  InpColorHistBull          = clrDeepSkyBlue; // Historical bullish setup color (more saturated than live -- outline-only needs the contrast)
+input color  InpColorHistBear          = clrMagenta;     // Historical bearish setup color
 
 //--- constants (mirror ict.py) ----------------------------------------
 #define FVG_SCAN_BARS    60   // how far back a standalone FVG may be and still count
@@ -1083,7 +1085,7 @@ void ScanHistory()
 void DrawHistoricalSetup(const IctSetup &s, int seq)
   {
    string base = OBJ_PREFIX + "HIST_" + s.shortCode + "_" + (s.bullish ? "B" : "S") + "_" + IntegerToString(seq) + "_";
-   color  col  = s.bullish ? InpColorBull : InpColorBear;
+   color  col  = s.bullish ? InpColorHistBull : InpColorHistBear;   // brighter/more saturated than live colors: historical zones are outline-only with no fill behind them
    datetime tRight = s.zoneTime + PeriodSeconds(InpLTF_Timeframe) * InpZoneExtendBars;
    string tag = "H " + s.shortCode + (s.tested ? " (tested)" : "");
 
@@ -1095,7 +1097,7 @@ void DrawHistoricalSetup(const IctSetup &s, int seq)
       ObjectSetInteger(0, zname, OBJPROP_FILL, false);   // unfilled outline: lighter to render, visually distinct from live zones
       ObjectSetInteger(0, zname, OBJPROP_BACK, true);
       ObjectSetInteger(0, zname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_SOLID);
-      ObjectSetInteger(0, zname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, zname, OBJPROP_WIDTH, 2);
      }
    else
      {
@@ -1103,7 +1105,7 @@ void DrawHistoricalSetup(const IctSetup &s, int seq)
       ObjectCreate(0, lname, OBJ_TREND, 0, s.zoneTime, s.zoneHigh, tRight, s.zoneHigh);
       ObjectSetInteger(0, lname, OBJPROP_COLOR, col);
       ObjectSetInteger(0, lname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_DASH);
-      ObjectSetInteger(0, lname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, lname, OBJPROP_WIDTH, 2);
       ObjectSetInteger(0, lname, OBJPROP_RAY_RIGHT, false);
      }
 
@@ -1111,7 +1113,7 @@ void DrawHistoricalSetup(const IctSetup &s, int seq)
    ObjectCreate(0, lblName, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
    ObjectSetString(0, lblName, OBJPROP_TEXT, " " + tag);
    ObjectSetInteger(0, lblName, OBJPROP_COLOR, col);
-   ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 8);
   }
 
 //+------------------------------------------------------------------+
