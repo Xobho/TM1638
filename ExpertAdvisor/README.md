@@ -187,3 +187,84 @@ trading concept (swing/FVG detection uses simple fractal and 3-candle-gap
 heuristics) — it will not perfectly match manual chart reading. **Backtest
 and forward-test on a demo account before using real funds.** Nothing here
 is financial advice.
+
+---
+
+# MMBM ICT Suite EA (7 strategies)
+
+File: [`MMBM_ICT_Suite_EA.mq5`](MMBM_ICT_Suite_EA.mq5)
+
+The single-strategy EA above implements one play (sweep → MSS → FVG) with a
+full pending-order state machine and history scan. The **Suite EA** is the
+chart counterpart of the Python bridge's `ict.py`: it evaluates a whole
+**suite of seven ICT strategies** every new bar, for both directions, draws
+each detected setup live, and can optionally trade the best "ready" one. It's
+a deliberately simpler *detect-and-draw-per-bar* design (no per-strategy
+pending-order lifecycle), so it's easy to read and tune as you go.
+
+## The seven strategies
+
+| Code | Strategy | Entry idea |
+|---|---|---|
+| `SWEEP` | Liquidity Sweep + MSS | Wick sweeps a swing & closes back inside → market-structure shift → entry in the impulse-leg FVG. Stages: swept → mss → ready |
+| `OB` | Order Block | Last opposing candle before a break of structure; retrace into it |
+| `FVG` | Fair Value Gap | Standalone unfilled 3-candle imbalance; retrace into the gap |
+| `BRK` | Breaker Block | Order block of a failed sweep that flipped with structure; retest |
+| `TS` | Turtle Soup | False breakout of the prior N-bar range extreme that closes back inside |
+| `OTE` | Optimal Trade Entry | The 0.62–0.79 fib retracement zone of the most recent impulse leg |
+| `CONT` | Continuation Retest | A broken swing level retested from the breakout side — a trend-*continuation* entry (the only non-reversal of the seven) |
+
+Each strategy can be toggled independently (`InpEnableSweep`, `InpEnableOB`,
+…). All detection runs on `InpLTF_Timeframe`; HTF bias (`InpHTF_Timeframe`)
+gates which directions are shown exactly as in the single-strategy EA.
+
+## Stage and "tested"
+
+Every setup carries two key attributes shown in its label and the dashboard:
+
+- **stage**: `ready` (price is in the zone / at the level *now* — actionable
+  on a market order) vs `forming` (structure is valid but price must still
+  retrace into it). `SWEEP` also shows its progression `swept` → `mss` →
+  `ready`.
+- **tested**: `true` if price has already wicked back into the zone since it
+  formed (even without closing inside). A *tested* zone is a weaker, used-up
+  version of the setup — it's drawn with a dotted (rather than solid) outline,
+  and `InpSkipTestedSetups` (default on) keeps auto-trade from entering one.
+
+## Chart visuals
+
+Drawings only render when the chart period matches `InpLTF_Timeframe` (same
+reason as the other EA — the objects are LTF-bar-sized). Each (strategy,
+direction) slot is redrawn each bar and named
+`ICTS_<CODE>_<B|S>_...`, so at most 14 setups show at once, replaced in place:
+
+- **Filled rectangle** for zone strategies (`OB`/`FVG`/`BRK`/`OTE`/ready
+  `SWEEP`), bounded to the zone and extended `InpZoneExtendBars` to the right.
+- **Horizontal line** for level strategies (`TS`, `CONT`, and pre-ready
+  `SWEEP` stages).
+- A **label** with the strategy code, stage, `(tested)`, and reward:risk.
+- **Entry / SL / TP lines** — only for `ready`, actionable setups (toggle with
+  `InpDrawTradeLines`) to keep the chart readable.
+
+Bullish setups use `InpColorBull`, bearish use `InpColorBear`.
+
+## Dashboard
+
+A top-left panel (`InpShowDashboard`) lists mode, chart/strategy TF match,
+HTF bias, then **one row per strategy** showing each direction's live state
+(e.g. `OB  B READY*  S form` — the `*` marks tested), plus account equity,
+open positions for this EA, and spread.
+
+## Trading
+
+`InpAutoTrade` defaults to **false** (scan/draw only — no orders). When on,
+each bar the EA picks the single best `ready`, actionable setup — preferring
+untested ones, then the highest reward:risk — and sends a **market order**
+(price is in the zone by definition of `ready`), one position at a time per
+magic number, sized by `InpRiskPercent` and gated by `InpMaxSpreadPoints`. As
+always, MT5's terminal-level "AutoTrading" button must also be enabled.
+
+This is intentionally a simpler execution model than the other EA's pending
+limits — it's meant as a starting point to forward-test the suite on a demo
+and adjust. Backtest before risking real funds.
+
