@@ -160,6 +160,7 @@ bool          g_htfBearBias = true;
 
 IctSetup      g_slots[NUM_SLOTS];   // current detections, indexed by SlotIndex()
 bool          g_slotActive[NUM_SLOTS];
+string        g_slotSkip[NUM_SLOTS]; // why a detected setup was filtered out: "" / "PD" / "RR"
 
 // Dealing range for premium/discount, recomputed once per bar in ScanAllStrategies.
 double        g_pdHigh = 0.0, g_pdLow = 0.0, g_pdEquilibrium = 0.0;
@@ -208,6 +209,7 @@ int OnInit()
      {
       ZeroMemory(g_slots[i]);
       g_slotActive[i] = false;
+      g_slotSkip[i]   = "";
      }
 
    if(!InpShowDashboard)
@@ -221,6 +223,7 @@ int OnInit()
    // OnTick otherwise only rescans when a new bar opens.
    g_lastLTFBarTime = iTime(_Symbol, InpLTF_Timeframe, 0);
    ScanAllStrategies();
+   ChartRedraw(0);
 
    return INIT_SUCCEEDED;
   }
@@ -261,6 +264,13 @@ void OnTick()
 
    if(InpShowDashboard)
       UpdateDashboard();
+
+   // Repaint every tick so created/deleted objects and dashboard text update
+   // on their own -- MT5 otherwise defers the visual until the next chart
+   // event, which is why stale drawings used to linger until a manual TF
+   // change. This does NOT re-detect (that's still bar-close only) or affect
+   // trading; it only flushes the visuals.
+   ChartRedraw(0);
   }
 
 //+------------------------------------------------------------------+
@@ -289,19 +299,22 @@ void ScanAllStrategies()
 
          IctSetup s;
          ZeroMemory(s);
-         bool found = allowed && RunDetector(n, bull, rates, total, s);
+         bool detected = allowed && RunDetector(n, bull, rates, total, s);
 
-         // Premium/Discount is a hard filter here, not just a trade-time gate:
-         // a setup whose entry is in the wrong half of the dealing range
-         // (buy in premium / sell in discount) is rejected outright -- it is
+         // The structure was found, but two hard filters can still reject it.
+         // We remember WHY (PD / RR) so the dashboard can show the outcome
+         // instead of the setup just silently vanishing. A rejected setup is
          // neither drawn nor traded.
-         if(found && !PremiumDiscountOK(s))
-            found = false;
-
-         // Minimum reward:risk (default 1:2). A setup whose target doesn't pay
-         // at least InpMinRR times the risk is skipped -- not drawn, not traded.
-         if(found && s.hasTrade && s.rr < InpMinRR)
-            found = false;
+         //   PD = wrong half of the dealing range (buy in premium / sell in discount)
+         //   RR = reward:risk below InpMinRR (default 1:2)
+         string skip = "";
+         bool found = detected;
+         if(detected)
+           {
+            if(!PremiumDiscountOK(s))                 { found = false; skip = "PD"; }
+            else if(s.hasTrade && s.rr < InpMinRR)    { found = false; skip = "RR"; }
+           }
+         g_slotSkip[slot] = skip;
 
          if(found)
            {
@@ -1086,6 +1099,8 @@ void ScanHistory()
                continue;
             if(s.stage != "ready" || s.zoneTime == lastDrawTime[slot])
                continue;                    // same persisting setup as the previous bar -- skip duplicate
+            if(s.hasTrade && s.rr < InpMinRR)
+               continue;                    // same 1:2 quality bar as the live scan
 
             DrawHistoricalSetup(s, counts[slot]);
             counts[slot]++;
@@ -1200,10 +1215,36 @@ string StrategyRowText(int stratNum)
          parts[d] = side + "off";
       else if(g_slotActive[slot])
          parts[d] = side + StageShort(g_slots[slot].stage) + (g_slots[slot].tested ? "*" : "");
+      else if(g_slotSkip[slot] != "")
+         parts[d] = side + "skip-" + g_slotSkip[slot];   // detected but filtered out (PD / RR)
       else
          parts[d] = side + "-";
      }
    return StringFormat("%-6s %-12s %-12s", code, parts[0], parts[1]);
+  }
+
+// Row color so the state reads at a glance: green = an actionable READY setup,
+// white = forming (valid, waiting for the retrace), gray = detected but
+// filtered out (PD/RR), dim = nothing / disabled.
+color StrategyRowColor(int stratNum)
+  {
+   if(!StrategyEnabled(stratNum))
+      return clrDimGray;
+   bool anyReady = false, anyForming = false, anySkip = false;
+   for(int d = 0; d < 2; d++)
+     {
+      int slot = SlotIndex(stratNum, d == 0);
+      if(g_slotActive[slot])
+        {
+         if(g_slots[slot].stage == "ready") anyReady = true; else anyForming = true;
+        }
+      else if(g_slotSkip[slot] != "")
+         anySkip = true;
+     }
+   if(anyReady)   return clrLimeGreen;
+   if(anyForming) return clrWhite;
+   if(anySkip)    return clrGray;
+   return clrDimGray;
   }
 
 void UpdateDashboard()
@@ -1250,7 +1291,7 @@ void UpdateDashboard()
    SetDashLine("Ctx", "Ctx: " + kzTxt + " | " + pdTxt, ctxCol);
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
-      SetDashLine("S" + IntegerToString(n), StrategyRowText(n), clrSilver);
+      SetDashLine("S" + IntegerToString(n), StrategyRowText(n), StrategyRowColor(n));
 
    SetDashLine("Acct",  "Equity " + DoubleToString(equity, 2) + " | Bal " + DoubleToString(balance, 2), clrWhite);
    SetDashLine("Pos",   "Open: " + IntegerToString(posCount) + " (" + DoubleToString(posLots, 2) + " lots)  P/L " + DoubleToString(posPnL, 2),

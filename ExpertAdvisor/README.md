@@ -273,9 +273,26 @@ Bullish setups use `InpColorBull`, bearish use `InpColorBear`.
 ## Dashboard
 
 A top-left panel (`InpShowDashboard`) lists mode, chart/strategy TF match,
-HTF bias, then **one row per strategy** showing each direction's live state
-(e.g. `FVG  B READY*  S form` — the `*` marks tested), plus account equity,
-open positions for this EA, and spread.
+HTF bias, then **one row per strategy** showing each direction's live state,
+plus account equity, open positions for this EA, and spread.
+
+Each strategy row shows both directions, e.g. `FVG  B READY*  S skip-RR`:
+
+- `READY` — price is in the zone now (actionable); `form` — valid structure
+  waiting for the retrace; `*` marks a tested zone.
+- `skip-PD` / `skip-RR` — the setup **was** detected but a hard filter rejected
+  it, so you can see *why* it isn't on the chart instead of it silently
+  vanishing: `PD` = wrong half of the dealing range, `RR` = below `InpMinRR`.
+- `-` — nothing detected; `off` — strategy toggled off.
+
+The whole row is color-coded so state reads at a glance: **green** = an
+actionable `READY` setup, **white** = forming, **gray** = detected-but-filtered,
+**dim** = nothing / disabled.
+
+The panel and all chart drawings **refresh on their own every tick**
+(`ChartRedraw`), so stale zones clear and states update live — you never have
+to flip the timeframe to force a redraw. Detection itself still runs only on
+bar close (no repaint); only the repaint is continuous.
 
 ## Trading
 
