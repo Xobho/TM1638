@@ -213,6 +213,12 @@ int OnInit()
    if(InpHistoryDays > 0 && DrawingsAllowed())
       ScanHistory();
 
+   // Repopulate live setups immediately on attach/input-change instead of
+   // waiting for the next new bar -- OnInit just wiped g_slots above, and
+   // OnTick otherwise only rescans when a new bar opens.
+   g_lastLTFBarTime = iTime(_Symbol, InpLTF_Timeframe, 0);
+   ScanAllStrategies();
+
    return INIT_SUCCEEDED;
   }
 

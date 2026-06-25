@@ -225,6 +225,10 @@ Each strategy can be toggled independently (`InpEnableSweep`, `InpEnableOB`,
 …). All detection runs on `InpLTF_Timeframe`; HTF bias (`InpHTF_Timeframe`)
 gates which directions are shown exactly as in the single-strategy EA.
 
+Toggling a strategy (or any input) takes effect immediately — `OnInit` runs
+a full live rescan as soon as you click OK, rather than waiting for the next
+new bar to repopulate the chart.
+
 ## Stage and "tested"
 
 Every setup carries two key attributes shown in its label and the dashboard:
