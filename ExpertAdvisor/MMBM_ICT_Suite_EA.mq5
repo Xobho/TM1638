@@ -108,20 +108,23 @@ input int    InpKZ2EndHour         = 16;    // Killzone 2 (New York) end hour, s
 
 input group "=== Chart Visuals ==="
 input bool   InpShowDrawings      = true;          // Draw detected setups on the chart
-input bool   InpDrawTradeLines    = true;          // Draw entry/SL/TP lines for "ready" setups
+input bool   InpDrawTradeLines    = true;          // Draw entry/SL/TP lines (forming + ready setups)
 input int    InpZoneExtendBars    = 12;            // How many bars to extend zone/level drawings to the right
 input bool   InpShowDashboard     = true;          // Show the on-chart info panel
-input color  InpColorBull         = clrAqua;       // Bullish zone/level color
-input color  InpColorBear         = clrLightPink;  // Bearish zone/level color
+input color  InpColorBull         = clrDodgerBlue; // Bullish zone color
+input color  InpColorBear         = clrCrimson;    // Bearish zone color
+input color  InpColorText         = clrBlack;      // Label TEXT color (use black on a white chart, white on a dark chart)
+input color  InpColorSweep        = clrDimGray;    // Sweep level line color
+input color  InpColorBOS          = clrDarkViolet; // BOS (break of structure) line color
 input color  InpColorEntry        = clrGoldenrod;  // Entry line color
 input color  InpColorSL           = clrRed;        // Stop loss line color
-input color  InpColorTP           = clrLimeGreen;  // Take profit line color
+input color  InpColorTP           = clrGreen;      // Take profit line color
 
 input group "=== History ==="
 input int    InpHistoryDays            = 5;   // Scan and draw completed "ready" setups from the past N days (0 = off)
 input int    InpMaxHistoricalPerSetup  = 5;   // Cap historical drawings per strategy+direction (bounds scan time & object count)
-input color  InpColorHistBull          = clrDeepSkyBlue; // Historical bullish setup color (more saturated than live -- outline-only needs the contrast)
-input color  InpColorHistBear          = clrMagenta;     // Historical bearish setup color
+input color  InpColorHistBull          = clrDeepSkyBlue; // Historical bullish zone color (distinct from live so past setups stand out)
+input color  InpColorHistBear          = clrMagenta;     // Historical bearish zone color
 
 //--- constants --------------------------------------------------------
 #define NUM_STRATEGIES    3
@@ -149,6 +152,11 @@ struct IctSetup
    double   sl;
    double   tp;
    double   rr;
+   // anatomy of the setup, for drawing the full picture (sweep -> BOS -> zone)
+   double   sweepLevel;   // the liquidity extreme that was swept (the stop sits beyond it)
+   datetime sweepTime;    // bar that did the sweep
+   double   bosLevel;     // the structure level the BOS broke
+   datetime bosTime;      // bar that confirmed the BOS
   };
 
 //--- globals -----------------------------------------------------------
@@ -682,6 +690,8 @@ bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
       return false;
 
    FillSetupCommon(o, 0, bullish);
+   o.sweepLevel = sweepExtreme; o.sweepTime = r[sweepIdx].time;
+   o.bosLevel   = bosLevel;     o.bosTime   = r[bosIdx].time;
    o.isZone = true; o.zoneHigh = fvgHigh; o.zoneLow = fvgLow; o.zoneTime = ftl;
    int fvgIdx = TimeToIndex(r, total, ftr);
    if(fvgIdx < 0) fvgIdx = 0;
@@ -710,6 +720,8 @@ bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
       return false;
 
    FillSetupCommon(o, 1, bullish);
+   o.sweepLevel = sweepExtreme; o.sweepTime = r[sweepIdx].time;
+   o.bosLevel   = bosLevel;     o.bosTime   = r[bosIdx].time;
    o.isZone = true; o.zoneHigh = zHi; o.zoneLow = zLo; o.zoneTime = tl;
    o.stage  = StageFromZone(r, zLo, zHi);
    o.tested = ZoneTested(r, invIdx, zLo, zHi);   // "tested" = a retest AFTER the inversion
@@ -764,6 +776,8 @@ bool Detect_Breaker(const MqlRates &r[], int total, bool bullish, IctSetup &o)
 
    double zoneLo = r[ob].low, zoneHi = r[ob].high;
    FillSetupCommon(o, 2, bullish);
+   o.sweepLevel = sweepExtreme; o.sweepTime = r[sweepIdx].time;
+   o.bosLevel   = bosLevel;     o.bosTime   = r[bosIdx].time;
    o.isZone = true; o.zoneHigh = zoneHi; o.zoneLow = zoneLo; o.zoneTime = r[ob].time;
    o.stage  = StageFromZone(r, zoneLo, zoneHi);
    o.tested = ZoneTested(r, flip, zoneLo, zoneHi); // "tested" = a retest AFTER the violation
@@ -979,17 +993,10 @@ void DrawSetup(const IctSetup &s)
       string zname = base + "Zone";
       ObjectCreate(0, zname, OBJ_RECTANGLE, 0, s.zoneTime, s.zoneHigh, tRight, s.zoneLow);
       ObjectSetInteger(0, zname, OBJPROP_COLOR, col);
-      ObjectSetInteger(0, zname, OBJPROP_FILL, true);
+      ObjectSetInteger(0, zname, OBJPROP_FILL, true);                 // solid colour fill
       ObjectSetInteger(0, zname, OBJPROP_BACK, true);
       ObjectSetInteger(0, zname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_SOLID);
-      ObjectSetInteger(0, zname, OBJPROP_WIDTH, 1);
-
-      string lname = base + "Lbl";
-      ObjectCreate(0, lname, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
-      ObjectSetString(0, lname, OBJPROP_TEXT, " " + tag);
-      ObjectSetInteger(0, lname, OBJPROP_COLOR, col);
-      ObjectSetInteger(0, lname, OBJPROP_ANCHOR, s.bullish ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(0, lname, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, zname, OBJPROP_WIDTH, 2);
      }
    else
      {
@@ -999,21 +1006,19 @@ void DrawSetup(const IctSetup &s)
       ObjectSetInteger(0, lvlname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_DASH);
       ObjectSetInteger(0, lvlname, OBJPROP_WIDTH, 2);
       ObjectSetInteger(0, lvlname, OBJPROP_RAY_RIGHT, false);
-
-      string lname = base + "Lbl";
-      ObjectCreate(0, lname, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
-      ObjectSetString(0, lname, OBJPROP_TEXT, " " + tag);
-      ObjectSetInteger(0, lname, OBJPROP_COLOR, col);
-      ObjectSetInteger(0, lname, OBJPROP_FONTSIZE, 8);
      }
 
-   // entry / SL / TP lines only for ready, actionable setups (keeps the chart clean)
-   if(InpDrawTradeLines && s.hasTrade && s.stage == "ready")
-     {
-      DrawHLine(base + "Entry", s.zoneTime, tRight, s.entry, InpColorEntry, STYLE_DASH,  "Entry");
-      DrawHLine(base + "SL",    s.zoneTime, tRight, s.sl,    InpColorSL,    STYLE_SOLID, "SL");
-      DrawHLine(base + "TP",    s.zoneTime, tRight, s.tp,    InpColorTP,    STYLE_SOLID, "TP");
-     }
+   string lname = base + "Lbl";
+   ObjectCreate(0, lname, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
+   ObjectSetString(0, lname, OBJPROP_TEXT, " " + tag);
+   ObjectSetInteger(0, lname, OBJPROP_COLOR, InpColorText);          // black on a white chart
+   ObjectSetInteger(0, lname, OBJPROP_ANCHOR, s.bullish ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(0, lname, OBJPROP_FONTSIZE, 8);
+
+   // Full anatomy: Sweep + BOS levels, plus Entry/SL/TP for every actionable
+   // setup (forming AND ready -- so you see the planned trade before price
+   // arrives, not only once it's already in the zone).
+   DrawSetupLines(base, s, tRight);
   }
 
 void DrawHLine(string name, datetime t1, datetime t2, double price, color col, ENUM_LINE_STYLE style, string tag)
@@ -1027,8 +1032,28 @@ void DrawHLine(string name, datetime t1, datetime t2, double price, color col, E
    string lbl = name + "Lbl";
    ObjectCreate(0, lbl, OBJ_TEXT, 0, t2, price);
    ObjectSetString(0, lbl, OBJPROP_TEXT, " " + tag + " " + DoubleToString(price, g_symbol.Digits()));
-   ObjectSetInteger(0, lbl, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, lbl, OBJPROP_COLOR, InpColorText);   // text in the user's label color (black on white charts)
    ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 7);
+  }
+
+//+------------------------------------------------------------------+
+//| Draw the full anatomy of a setup -- the Sweep level, the BOS     |
+//| level, and (when actionable) the Entry/SL/TP -- so the whole     |
+//| Sweep -> BOS -> retest story is visible, not just the zone box.  |
+//| Shared by both the live and historical drawing paths.            |
+//+------------------------------------------------------------------+
+void DrawSetupLines(string base, const IctSetup &s, datetime tRight)
+  {
+   if(s.sweepTime > 0)
+      DrawHLine(base + "Sweep", s.sweepTime, tRight, s.sweepLevel, InpColorSweep, STYLE_DASH, "Sweep");
+   if(s.bosTime > 0)
+      DrawHLine(base + "BOS", s.bosTime, tRight, s.bosLevel, InpColorBOS, STYLE_DASH, "BOS");
+   if(InpDrawTradeLines && s.hasTrade)
+     {
+      DrawHLine(base + "Entry", s.zoneTime, tRight, s.entry, InpColorEntry, STYLE_DASH,  "Entry");
+      DrawHLine(base + "SL",    s.zoneTime, tRight, s.sl,    InpColorSL,    STYLE_SOLID, "SL");
+      DrawHLine(base + "TP",    s.zoneTime, tRight, s.tp,    InpColorTP,    STYLE_SOLID, "TP");
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -1037,9 +1062,10 @@ void DrawHLine(string name, datetime t1, datetime t2, double price, color col, E
 //| Single ascending CopyRates fetch is reversed into one descending |
 //| array ONCE, then each "as of bar j" view fed to the live         |
 //| detectors is just a cheap slice of that array, not a fresh       |
-//| CopyRates. Drawings are capped per strategy+direction (no entry/ |
-//| SL/TP lines, 2 objects per find) to keep object count and scan   |
-//| time bounded regardless of how many days are requested.         |
+//| CopyRates. Drawings are capped per strategy+direction             |
+//| (InpMaxHistoricalPerSetup) to keep object count and scan time     |
+//| bounded; each find draws the full anatomy (zone + Sweep/BOS +     |
+//| Entry/SL/TP), so lower the cap if the chart gets busy.            |
 //+------------------------------------------------------------------+
 void ScanHistory()
   {
@@ -1113,7 +1139,7 @@ void ScanHistory()
 void DrawHistoricalSetup(const IctSetup &s, int seq)
   {
    string base = OBJ_PREFIX + "HIST_" + s.shortCode + "_" + (s.bullish ? "B" : "S") + "_" + IntegerToString(seq) + "_";
-   color  col  = s.bullish ? InpColorHistBull : InpColorHistBear;   // brighter/more saturated than live colors: historical zones are outline-only with no fill behind them
+   color  col  = s.bullish ? InpColorHistBull : InpColorHistBear;
    datetime tRight = s.zoneTime + PeriodSeconds(InpLTF_Timeframe) * InpZoneExtendBars;
    string tag = "H " + s.shortCode + (s.tested ? " (tested)" : "");
 
@@ -1122,7 +1148,7 @@ void DrawHistoricalSetup(const IctSetup &s, int seq)
       string zname = base + "Zone";
       ObjectCreate(0, zname, OBJ_RECTANGLE, 0, s.zoneTime, s.zoneHigh, tRight, s.zoneLow);
       ObjectSetInteger(0, zname, OBJPROP_COLOR, col);
-      ObjectSetInteger(0, zname, OBJPROP_FILL, false);   // unfilled outline: lighter to render, visually distinct from live zones
+      ObjectSetInteger(0, zname, OBJPROP_FILL, true);    // filled, same as live zones
       ObjectSetInteger(0, zname, OBJPROP_BACK, true);
       ObjectSetInteger(0, zname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_SOLID);
       ObjectSetInteger(0, zname, OBJPROP_WIDTH, 2);
@@ -1140,8 +1166,12 @@ void DrawHistoricalSetup(const IctSetup &s, int seq)
    string lblName = base + "Lbl";
    ObjectCreate(0, lblName, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
    ObjectSetString(0, lblName, OBJPROP_TEXT, " " + tag);
-   ObjectSetInteger(0, lblName, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, lblName, OBJPROP_COLOR, InpColorText);   // black on a white chart
    ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 8);
+
+   // Full anatomy for historical setups too -- Sweep / BOS / Entry / SL / TP --
+   // so a past setup shows the whole trade, not just the box.
+   DrawSetupLines(base, s, tRight);
   }
 
 //+------------------------------------------------------------------+

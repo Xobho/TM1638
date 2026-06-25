@@ -260,15 +260,28 @@ Every setup carries two key attributes shown in its label and the dashboard:
 Drawings only render when the chart period matches `InpLTF_Timeframe` (same
 reason as the other EA — the objects are LTF-bar-sized). Each (strategy,
 direction) slot is redrawn each bar and named
-`ICTS_<CODE>_<B|S>_...`, so at most 6 setups show at once, replaced in place:
+`ICTS_<CODE>_<B|S>_...`, so at most 6 setups show at once, replaced in place.
+Every setup draws its **full anatomy**, not just the box, so you can read the
+whole `Sweep → BOS → retest` story at a glance:
 
-- **Filled rectangle** for the entry zone (`FVG`/`IFVG`/`BRK` are all zones),
-  bounded to the zone and extended `InpZoneExtendBars` to the right.
+- **Filled colour rectangle** for the entry zone (`FVG`/`IFVG`/`BRK` are all
+  zones), bounded to the zone and extended `InpZoneExtendBars` to the right.
+- A **Sweep line** (`InpColorSweep`) at the swept liquidity extreme and a
+  **BOS line** (`InpColorBOS`) at the broken structure level.
+- **Entry / SL / TP lines** — drawn for **both forming and ready** setups (so
+  you see the planned trade before price arrives), toggle with
+  `InpDrawTradeLines`.
 - A **label** with the strategy code, stage, `(tested)`, and reward:risk.
-- **Entry / SL / TP lines** — only for `ready`, actionable setups (toggle with
-  `InpDrawTradeLines`) to keep the chart readable.
 
-Bullish setups use `InpColorBull`, bearish use `InpColorBear`.
+**Colours for your chart background:** zone fills use `InpColorBull` /
+`InpColorBear` (defaults DodgerBlue / Crimson — bold on white). **All label
+text uses `InpColorText` (default black)** — set it to black on a white chart
+or white on a dark chart so the labels are always readable. Sweep, BOS, Entry,
+SL, and TP each have their own colour input too.
+
+Tested zones are drawn dotted; fresh zones solid. The same full anatomy is
+drawn for historical setups (`InpHistoryDays`) — if the chart gets busy,
+lower `InpMaxHistoricalPerSetup` or turn `InpDrawTradeLines` off.
 
 ## Dashboard
 
