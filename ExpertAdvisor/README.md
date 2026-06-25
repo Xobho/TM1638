@@ -265,11 +265,25 @@ open positions for this EA, and spread.
 ## Trading
 
 `InpAutoTrade` defaults to **false** (scan/draw only — no orders). When on,
-each bar the EA picks the single best `ready`, actionable setup — preferring
-untested ones, then the highest reward:risk — and sends a **market order**
-(price is in the zone by definition of `ready`), one position at a time per
-magic number, sized by `InpRiskPercent` and gated by `InpMaxSpreadPoints`. As
-always, MT5's terminal-level "AutoTrading" button must also be enabled.
+the EA picks the single best actionable setup — preferring untested ones, then
+the highest reward:risk — and sends a **market order**, one position at a time
+per magic number, sized by `InpRiskPercent` and gated by `InpMaxSpreadPoints`.
+As always, MT5's terminal-level "AutoTrading" button must also be enabled.
+
+`InpTriggerMode` decides *when* a setup becomes actionable:
+
+- **`TRIGGER_TOUCH`** (default) — checked **every tick**. The instant live
+  price (including just a wick) reaches into the zone band
+  (`zoneLow .. zoneHigh` ± `InpSweepBufferPoints`), the trade fires. Catches
+  fast touches that reverse before the candle closes. The setups themselves are
+  still *detected* only on closed bars (no repaint) — only the entry trigger is
+  intrabar.
+- **`TRIGGER_CLOSE`** — checked only on **bar close**. A candle must actually
+  *close* inside the zone (`stage == ready`) before the trade fires. Fewer,
+  cleaner entries; ignores wick-and-reverse touches. This was the original
+  behavior.
+
+The active mode shows on the dashboard's Mode line, e.g. `AUTO-TRADE (touch)`.
 
 This is intentionally a simpler execution model than the other EA's pending
 limits — it's meant as a starting point to forward-test the suite on a demo

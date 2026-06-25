@@ -57,6 +57,13 @@
 #include <Trade\Trade.mqh>
 #include <Trade\SymbolInfo.mqh>
 
+//--- when a setup becomes actionable for auto-trade -------------------
+enum ENUM_TRIGGER_MODE
+  {
+   TRIGGER_CLOSE = 0,   // Close-confirm: a candle must CLOSE inside the zone (checked on bar close)
+   TRIGGER_TOUCH = 1    // Touch: fire the instant live price (incl. a wick) reaches into the zone
+  };
+
 //--- inputs -----------------------------------------------------------
 input ENUM_TIMEFRAMES InpHTF_Timeframe        = PERIOD_H4;   // Higher timeframe used for directional bias
 input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_M15;  // Entry timeframe (all detection runs here)
@@ -80,6 +87,7 @@ input bool   InpEnableCont    = true;   // 7. Continuation Retest
 
 input group "=== Trading ==="
 input bool   InpAutoTrade         = false;   // false = scan/draw only (NO orders). true = trade the best ready setup
+input ENUM_TRIGGER_MODE InpTriggerMode = TRIGGER_TOUCH; // When to fire: TOUCH (wick into zone, intrabar) or CLOSE (candle closes inside)
 input double InpRiskPercent       = 1.0;     // Risk per trade, % of account equity
 input int    InpMaxSpreadPoints   = 30;      // Skip entries if spread exceeds this
 input bool   InpSkipTestedSetups  = true;    // Don't enter a zone that has already been tested once
@@ -236,6 +244,12 @@ void OnTick()
       ScanAllStrategies();
      }
 
+   // Touch mode evaluates every tick so a wick into a zone fires immediately,
+   // not only on bar close. The setups themselves are still detected on closed
+   // bars (in ScanAllStrategies) -- only the entry trigger is intrabar here.
+   if(InpAutoTrade && InpTriggerMode == TRIGGER_TOUCH)
+      TradeBestSetup(true);
+
    if(InpShowDashboard)
       UpdateDashboard();
   }
@@ -284,8 +298,8 @@ void ScanAllStrategies()
         }
      }
 
-   if(InpAutoTrade)
-      TradeBestReadySetup();
+   if(InpAutoTrade && InpTriggerMode == TRIGGER_CLOSE)
+      TradeBestSetup(false);
   }
 
 //+------------------------------------------------------------------+
@@ -839,22 +853,32 @@ void SetTrade(IctSetup &o, double entry, double sl, double tp)
   }
 
 //+------------------------------------------------------------------+
-//| Auto-trade: take the single best "ready" setup, one at a time.   |
-//| Selection: ready + actionable, prefer untested, then highest RR. |
+//| Auto-trade: take the single best actionable setup, one at a time.|
+//| touchMode=false -> the closed candle must be inside the zone     |
+//|   (stage "ready"); touchMode=true -> live price (incl. a wick)   |
+//|   is currently inside the zone band.                             |
+//| Selection: triggered + actionable, prefer untested, then top RR. |
 //+------------------------------------------------------------------+
-void TradeBestReadySetup()
+void TradeBestSetup(bool touchMode)
   {
    if(PositionExistsForEA())
       return;
    if((int)g_symbol.Spread() > InpMaxSpreadPoints)
       return;
 
+   double buf = InpSweepBufferPoints * g_symbol.Point();
+   double px  = g_symbol.Bid();
+
    int best = -1;
    for(int i = 0; i < NUM_SLOTS; i++)
      {
       if(!g_slotActive[i]) continue;
       IctSetup s = g_slots[i];
-      if(s.stage != "ready" || !s.hasTrade) continue;
+      if(!s.hasTrade) continue;
+      bool triggered = touchMode
+                       ? (s.zoneLow - buf <= px && px <= s.zoneHigh + buf)
+                       : (s.stage == "ready");
+      if(!triggered) continue;
       if(InpSkipTestedSetups && s.tested) continue;
       if(best < 0) { best = i; continue; }
       IctSetup b = g_slots[best];
@@ -1216,7 +1240,7 @@ void UpdateDashboard()
      }
 
    SetDashLine("Title", "=== MMBM ICT Suite (7 strategies) ===", clrYellow);
-   SetDashLine("Mode",  "Mode: " + (InpAutoTrade ? "AUTO-TRADE" : "SCAN ONLY"),
+   SetDashLine("Mode",  "Mode: " + (InpAutoTrade ? ("AUTO-TRADE (" + (InpTriggerMode == TRIGGER_TOUCH ? "touch" : "close") + ")") : "SCAN ONLY"),
                InpAutoTrade ? clrLimeGreen : clrOrange);
    SetDashLine("TF",    "Chart: " + EnumToString((ENUM_TIMEFRAMES)_Period) + (tfMatch ? "  [OK]" : "  [MISMATCH-drawings hidden]"),
                tfMatch ? clrWhite : clrRed);
