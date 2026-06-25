@@ -74,7 +74,8 @@ enum ENUM_ENTRY_MODE
 //--- inputs -----------------------------------------------------------
 input ENUM_TIMEFRAMES InpHTF_Timeframe        = PERIOD_H4;   // Higher timeframe used for directional bias
 input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_M15;  // Entry timeframe (all detection runs here)
-input int             InpSwingLeftRight       = 3;           // Bars each side required to confirm a swing point
+input int             InpSwingLeftRight       = 3;           // Bars each side to confirm a general structure swing
+input int             InpLiquiditySwingBars   = 5;           // Bars each side to confirm a PROPER swing for the sweep / BOS / TP liquidity (>= InpSwingLeftRight = stronger, more significant pivots)
 input bool            InpRequireHTFBias       = true;        // Only show/trade setups aligned with HTF structure
 input int             InpMaxBarsAfterSweep    = 25;          // Max bars a sweep/break may be old and still count
 input int             InpMaxBarsForFVGSearch  = 15;          // How far back from the MSS bar to search the entry FVG
@@ -436,25 +437,11 @@ bool IsSwingLow(const MqlRates &r[], int idx, int k)
   }
 
 //+------------------------------------------------------------------+
-//| Index of the most recent confirmed swing high/low, or -1.         |
-//+------------------------------------------------------------------+
-int RecentSwing(const MqlRates &r[], int total, bool wantHigh)
-  {
-   int k = InpSwingLeftRight;
-   for(int i = k; i < total - k; i++)
-     {
-      if(wantHigh && IsSwingHigh(r, i, k))   return i;
-      if(!wantHigh && IsSwingLow(r, i, k))   return i;
-     }
-   return -1;
-  }
-
-//+------------------------------------------------------------------+
 //| Next external liquidity beyond entry = the draw-on-liquidity TP.  |
 //+------------------------------------------------------------------+
 bool FindLiquidityTarget(const MqlRates &r[], int total, bool bullish, double entryPrice, double &target)
   {
-   int k = InpSwingLeftRight;
+   int k = InpLiquiditySwingBars;   // target a PROPER liquidity pool, not a minor swing
    for(int i = k; i < total - k; i++)
      {
       if(bullish && IsSwingHigh(r, i, k) && r[i].high > entryPrice)  { target = r[i].high; return true; }
@@ -507,7 +494,7 @@ int TimeToIndex(const MqlRates &r[], int total, datetime t)
 //+------------------------------------------------------------------+
 bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweepIdx, double &sweepPrice, double &liquidityLevel, datetime &liquidityTime)
   {
-   int k = InpSwingLeftRight;
+   int k = InpLiquiditySwingBars;   // a swept pool must be a PROPER swing, not a minor wiggle
    for(int i = k + 1; i < total - k; i++)
      {
       if(bullish && IsSwingLow(r, i, k))
@@ -530,7 +517,7 @@ bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweep
 
 bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int sweepIdx, int &mssIdx, double &mssLevel, int &refIdx)
   {
-   int k = InpSwingLeftRight;
+   int k = InpLiquiditySwingBars;   // the broken swing (BOS) must be a PROPER pivot too
    double refLevel = 0; bool found = false; int swingIdx = -1;
    for(int i = sweepIdx - k; i >= k; i--)
      {

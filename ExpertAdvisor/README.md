@@ -213,8 +213,8 @@ pending-order lifecycle), so it's easy to read and tune as you go.
 All three strategies are built on **one mandatory ordered sequence** and
 differ only in *which zone* price retests for the entry:
 
-1. **Sweep** — a wick raids liquidity beyond a swing (a stop hunt) and closes
-   back inside. The stop loss sits just beyond this sweep extreme.
+1. **Sweep** — a wick raids liquidity beyond a **proper swing** (a stop hunt)
+   and closes back inside. The stop loss sits just beyond this sweep extreme.
 2. **BOS** — price then breaks structure in the *opposite* direction,
    confirming the bias shift. This must come **after** the sweep.
 3. **Retest** — price pulls back into the entry zone; you enter in the BOS
@@ -222,6 +222,14 @@ differ only in *which zone* price retests for the entry:
 
 A zone with no sweep + BOS in front of it is **never** reported — that
 ordering is the whole point.
+
+**Proper swings matter.** The swept pool, the broken BOS level, and the TP
+liquidity must all be *significant* pivots, not minor wiggles — a sweep of an
+insignificant low/high isn't a real liquidity raid. `InpLiquiditySwingBars`
+(default 5) sets how many bars on each side confirm these liquidity swings; it
+is deliberately stronger than `InpSwingLeftRight` (default 3, used for general
+structure). Raise it if the sweep/BOS still anchor to levels that aren't clean
+highs/lows on your chart.
 
 ## The three strategies
 
