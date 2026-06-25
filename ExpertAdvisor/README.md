@@ -285,6 +285,12 @@ the highest reward:risk — and sends a **market order**, one position at a time
 per magic number, sized by `InpRiskPercent` and gated by `InpMaxSpreadPoints`.
 As always, MT5's terminal-level "AutoTrading" button must also be enabled.
 
+**Minimum reward:risk** (`InpMinRR`, default `2.0` = **1:2**) is a hard filter
+applied at detection: a setup whose target (next external liquidity, or the
+`InpFallbackRR` fallback) doesn't pay at least `InpMinRR`× the risk is skipped
+entirely — neither drawn nor traded — so the chart and the dashboard only show
+setups worth taking.
+
 `InpTriggerMode` decides *when* a setup becomes actionable:
 
 - **`TRIGGER_TOUCH`** (default) — checked **every tick**. The instant live

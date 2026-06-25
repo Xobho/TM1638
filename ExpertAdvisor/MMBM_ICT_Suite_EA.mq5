@@ -82,6 +82,7 @@ input double          InpMinFVGSizePoints     = 30;          // Minimum FVG size
 input ENUM_ENTRY_MODE InpEntryMode            = ENTRY_FIRST_TOUCH; // Entry price inside the zone: first-touch (wick) / midpoint / far edge
 input double          InpSweepBufferPoints    = 20;          // Stop buffer + zone tolerance (points) for all strategies
 input double          InpFallbackRR           = 2.0;         // Reward:Risk used when no liquidity target is found
+input double          InpMinRR                = 2.0;         // Minimum reward:risk (2.0 = 1:2). Setups below this are skipped (not drawn or traded)
 
 input group "=== Strategy toggles ==="
 input bool   InpEnableFVG     = true;   // 1. Sweep -> BOS -> FVG
@@ -295,6 +296,11 @@ void ScanAllStrategies()
          // (buy in premium / sell in discount) is rejected outright -- it is
          // neither drawn nor traded.
          if(found && !PremiumDiscountOK(s))
+            found = false;
+
+         // Minimum reward:risk (default 1:2). A setup whose target doesn't pay
+         // at least InpMinRR times the risk is skipped -- not drawn, not traded.
+         if(found && s.hasTrade && s.rr < InpMinRR)
             found = false;
 
          if(found)
