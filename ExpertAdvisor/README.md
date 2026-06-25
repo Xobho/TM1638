@@ -266,8 +266,10 @@ whole `Sweep → BOS → retest` story at a glance:
 
 - **Filled colour rectangle** for the entry zone (`FVG`/`IFVG`/`BRK` are all
   zones), bounded to the zone and extended `InpZoneExtendBars` to the right.
-- A **Sweep line** (`InpColorSweep`) at the swept liquidity extreme and a
-  **BOS line** (`InpColorBOS`) at the broken structure level.
+- A **Sweep line** (`InpColorSweep`) at the raided liquidity level (the stop
+  sits just beyond it) and a **BOS line** (`InpColorBOS`) at the broken
+  structure level, anchored to the broken swing's candle so it lines up with
+  that swing's tip rather than floating off the break bar.
 - **Entry / SL / TP lines** — drawn for **both forming and ready** setups (so
   you see the planned trade before price arrives), toggle with
   `InpDrawTradeLines`.

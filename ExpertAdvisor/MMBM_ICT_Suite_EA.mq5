@@ -528,21 +528,23 @@ bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweep
    return false;
   }
 
-bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int sweepIdx, int &mssIdx, double &mssLevel)
+bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int sweepIdx, int &mssIdx, double &mssLevel, int &refIdx)
   {
    int k = InpSwingLeftRight;
-   double refLevel = 0; bool found = false;
+   double refLevel = 0; bool found = false; int swingIdx = -1;
    for(int i = sweepIdx - k; i >= k; i--)
      {
-      if(bullish && IsSwingHigh(r, i, k))  { refLevel = r[i].high; found = true; break; }
-      if(!bullish && IsSwingLow(r, i, k))  { refLevel = r[i].low;  found = true; break; }
+      if(bullish && IsSwingHigh(r, i, k))  { refLevel = r[i].high; swingIdx = i; found = true; break; }
+      if(!bullish && IsSwingLow(r, i, k))  { refLevel = r[i].low;  swingIdx = i; found = true; break; }
      }
    if(!found)
       return false;
    for(int j = sweepIdx - 1; j >= 0; j--)
      {
-      if(bullish && r[j].close > refLevel)  { mssIdx = j; mssLevel = refLevel; return true; }
-      if(!bullish && r[j].close < refLevel) { mssIdx = j; mssLevel = refLevel; return true; }
+      // mssIdx = the bar that CLOSED through the level (where structure broke);
+      // refIdx = the swing bar that DEFINES the level (where the line anchors).
+      if(bullish && r[j].close > refLevel)  { mssIdx = j; mssLevel = refLevel; refIdx = swingIdx; return true; }
+      if(!bullish && r[j].close < refLevel) { mssIdx = j; mssLevel = refLevel; refIdx = swingIdx; return true; }
      }
    return false;
   }
@@ -575,19 +577,24 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
 //+------------------------------------------------------------------+
 bool FindSweepBOS(const MqlRates &r[], int total, bool bullish,
                   int &sweepIdx, double &sweepExtreme,
-                  int &bosIdx, double &bosLevel, datetime &liqTime)
+                  double &sweepLevel, datetime &sweepTime,
+                  int &bosIdx, double &bosLevel, datetime &bosTime)
   {
-   double sweepPrice, liqLevel;
+   double sweepPrice, liqLevel; datetime liqTime;
    if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
       return false;
    if(sweepIdx > InpMaxBarsAfterSweep)
       return false;
-   sweepExtreme = sweepPrice;
+   sweepExtreme = sweepPrice;     // the wick extreme -- the stop sits beyond THIS
+   sweepLevel   = liqLevel;       // the raided liquidity level -- the Sweep line sits HERE
+   sweepTime    = liqTime;        // the swing bar that was raided (line anchors to its tip)
 
-   int mssIdx; double mssLevel;
-   if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel))
+   int mssIdx, refIdx; double mssLevel;
+   if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel, refIdx))
       return false;
-   bosIdx = mssIdx; bosLevel = mssLevel;
+   bosIdx   = mssIdx;             // the breaking bar -- used by the zone search logic
+   bosLevel = mssLevel;
+   bosTime  = r[refIdx].time;     // anchor the BOS line at the broken swing's tip, not the break bar
    return true;                                  // sweep older than BOS (bosIdx < sweepIdx)
   }
 
@@ -681,8 +688,9 @@ bool FindInversionFVG(const MqlRates &r[], int total, bool bullish, int bosIdx, 
 //+------------------------------------------------------------------+
 bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
   {
-   int sweepIdx, bosIdx; double sweepExtreme, bosLevel; datetime liqTime;
-   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, bosIdx, bosLevel, liqTime))
+   int sweepIdx, bosIdx;
+   double sweepExtreme, sweepLevel, bosLevel; datetime sweepTime, bosTime;
+   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, sweepLevel, sweepTime, bosIdx, bosLevel, bosTime))
       return false;
 
    double fvgHigh, fvgLow; datetime ftl, ftr;
@@ -690,8 +698,8 @@ bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
       return false;
 
    FillSetupCommon(o, 0, bullish);
-   o.sweepLevel = sweepExtreme; o.sweepTime = r[sweepIdx].time;
-   o.bosLevel   = bosLevel;     o.bosTime   = r[bosIdx].time;
+   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime;
+   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;
    o.isZone = true; o.zoneHigh = fvgHigh; o.zoneLow = fvgLow; o.zoneTime = ftl;
    int fvgIdx = TimeToIndex(r, total, ftr);
    if(fvgIdx < 0) fvgIdx = 0;
@@ -711,8 +719,9 @@ bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
 //+------------------------------------------------------------------+
 bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
   {
-   int sweepIdx, bosIdx; double sweepExtreme, bosLevel; datetime liqTime;
-   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, bosIdx, bosLevel, liqTime))
+   int sweepIdx, bosIdx;
+   double sweepExtreme, sweepLevel, bosLevel; datetime sweepTime, bosTime;
+   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, sweepLevel, sweepTime, bosIdx, bosLevel, bosTime))
       return false;
 
    double zHi, zLo; datetime tl, tr; int invIdx;
@@ -720,8 +729,8 @@ bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
       return false;
 
    FillSetupCommon(o, 1, bullish);
-   o.sweepLevel = sweepExtreme; o.sweepTime = r[sweepIdx].time;
-   o.bosLevel   = bosLevel;     o.bosTime   = r[bosIdx].time;
+   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime;
+   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;
    o.isZone = true; o.zoneHigh = zHi; o.zoneLow = zLo; o.zoneTime = tl;
    o.stage  = StageFromZone(r, zLo, zHi);
    o.tested = ZoneTested(r, invIdx, zLo, zHi);   // "tested" = a retest AFTER the inversion
@@ -739,8 +748,9 @@ bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
 //+------------------------------------------------------------------+
 bool Detect_Breaker(const MqlRates &r[], int total, bool bullish, IctSetup &o)
   {
-   int sweepIdx, bosIdx; double sweepExtreme, bosLevel; datetime liqTime;
-   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, bosIdx, bosLevel, liqTime))
+   int sweepIdx, bosIdx;
+   double sweepExtreme, sweepLevel, bosLevel; datetime sweepTime, bosTime;
+   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, sweepLevel, sweepTime, bosIdx, bosLevel, bosTime))
       return false;
 
    int loI = bosIdx + 1, hiI = sweepIdx;          // the leg that built the swept extreme
@@ -776,8 +786,8 @@ bool Detect_Breaker(const MqlRates &r[], int total, bool bullish, IctSetup &o)
 
    double zoneLo = r[ob].low, zoneHi = r[ob].high;
    FillSetupCommon(o, 2, bullish);
-   o.sweepLevel = sweepExtreme; o.sweepTime = r[sweepIdx].time;
-   o.bosLevel   = bosLevel;     o.bosTime   = r[bosIdx].time;
+   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime;
+   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;
    o.isZone = true; o.zoneHigh = zoneHi; o.zoneLow = zoneLo; o.zoneTime = r[ob].time;
    o.stage  = StageFromZone(r, zoneLo, zoneHi);
    o.tested = ZoneTested(r, flip, zoneLo, zoneHi); // "tested" = a retest AFTER the violation
