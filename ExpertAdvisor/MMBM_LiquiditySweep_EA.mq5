@@ -33,6 +33,7 @@ input int             InpMaxBarsAfterSweep    = 25;          // Max LTF bars all
 input int             InpMaxBarsForFVGSearch  = 15;          // How far back from the MSS bar to search for the entry FVG
 input double          InpMinFVGSizePoints     = 30;          // Minimum FVG size (points) to be tradable
 input bool            InpEntryAtMidpoint      = true;        // true = limit @ 50% of FVG, false = limit @ far edge of FVG
+input bool            InpSkipTestedFVG        = false;       // Skip the entry if price already wicked back into the FVG before MSS confirmed (a used-up zone)
 input double          InpSweepBufferPoints    = 20;          // Extra buffer beyond the sweep extreme for the stop loss
 input double          InpRiskPercent          = 1.0;         // Risk per trade, % of account equity
 input double          InpFallbackRR           = 2.0;         // Reward:Risk used when no liquidity target is found
@@ -86,6 +87,7 @@ struct Setup
    double     fvgLow;
    datetime   fvgTimeLeft;     // time of the older of the two outer FVG candles
    datetime   fvgTimeRight;    // time of the newer of the two outer FVG candles
+   bool       tested;          // price already wicked back into the FVG since it formed (a used-up zone)
    ulong      pendingTicket;
    int        pendingPlacedBar;
   };
@@ -326,6 +328,11 @@ void ProcessSetup(Setup &s, const MqlRates &rates[], int total)
             s.fvgTimeLeft  = fvgTimeLeft;
             s.fvgTimeRight = fvgTimeRight;
 
+            int fvgIdx = -1;
+            for(int t = 0; t < total; t++)
+               if(rates[t].time == fvgTimeRight) { fvgIdx = t; break; }
+            s.tested = ZoneTested(rates, fvgIdx, fvgLow, fvgHigh, g_symbol.Point(), InpSweepBufferPoints);
+
             if(DrawingsAllowed())
                DrawFVG(s);
 
@@ -485,6 +492,45 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
   }
 
 //+------------------------------------------------------------------+
+//| True if any candle strictly after the FVG formed (refIdx, the     |
+//| newer outer candle of the 3-candle gap) already had a wick reach  |
+//| into the zone -- i.e. the zone is already "used up" rather than   |
+//| fresh, even though FindEntryFVG only checks the gap's existence,  |
+//| not whether price has since retested it once already.            |
+//+------------------------------------------------------------------+
+bool ZoneTested(const MqlRates &r[], int refIdx, double lo, double hi, double point, double bufferPts)
+  {
+   if(refIdx <= 0)
+      return false;
+   double buf = bufferPts * point;
+   double zlo = lo - buf, zhi = hi + buf;
+   for(int idx = 0; idx < refIdx; idx++)
+      if(r[idx].low <= zhi && r[idx].high >= zlo)
+         return true;
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Same check for the ascending historical array: any candle between |
+//| the FVG's formation (fvgRightIdx, exclusive) and the MSS bar       |
+//| (exclusive -- that's when the pending order would have been       |
+//| placed) that already wicked into the zone.                        |
+//+------------------------------------------------------------------+
+bool ZoneTestedAscending(const MqlRates &r[], int n, int fvgRightIdx, int mssIdx, double lo, double hi, double point, double bufferPts)
+  {
+   double buf = bufferPts * point;
+   double zlo = lo - buf, zhi = hi + buf;
+   for(int idx = fvgRightIdx + 1; idx < mssIdx; idx++)
+     {
+      if(idx < 0 || idx >= n)
+         continue;
+      if(r[idx].low <= zhi && r[idx].high >= zlo)
+         return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
 //| Next external liquidity beyond entry - used as the take profit    |
 //| target (the "draw on liquidity").                                 |
 //+------------------------------------------------------------------+
@@ -529,6 +575,12 @@ void ComputeEntrySL(bool bullish, double fvgHigh, double fvgLow, double sweepExt
 void PlacePendingOrder(Setup &s, const MqlRates &rates[], int total)
   {
    if((int)(g_symbol.Spread()) > InpMaxSpreadPoints)
+     {
+      ResetSetup(s, InpClearInvalidatedSteps);
+      return;
+     }
+
+   if(InpSkipTestedFVG && s.tested)
      {
       ResetSetup(s, InpClearInvalidatedSteps);
       return;
@@ -800,12 +852,12 @@ void DrawFVG(const Setup &s)
    ObjectSetInteger(0, name, OBJPROP_COLOR, col);
    ObjectSetInteger(0, name, OBJPROP_FILL, true);
    ObjectSetInteger(0, name, OBJPROP_BACK, true);
-   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_SOLID);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 
    string labelName = pfx + "FVGLabel";
    ObjectCreate(0, labelName, OBJ_TEXT, 0, t2, s.fvgHigh);
-   ObjectSetString(0, labelName, OBJPROP_TEXT, " FVG / POI");
+   ObjectSetString(0, labelName, OBJPROP_TEXT, s.tested ? " FVG / POI (tested)" : " FVG / POI");
    ObjectSetInteger(0, labelName, OBJPROP_COLOR, col);
    ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
   }
@@ -1052,8 +1104,8 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
         }
 
       // search the impulse leg (sweepIdx..mssIdx) for the entry FVG, nearest to mssIdx first
-      double fvgHigh = 0, fvgLow = 0; datetime fvgTimeLeft = 0, fvgTimeRight = 0;
-      if(!FindEntryFVGAscending(hr, n, sweepIdx, mssIdx, bullish, fvgHigh, fvgLow, fvgTimeLeft, fvgTimeRight))
+      double fvgHigh = 0, fvgLow = 0; datetime fvgTimeLeft = 0, fvgTimeRight = 0; int fvgRightIdx = -1;
+      if(!FindEntryFVGAscending(hr, n, sweepIdx, mssIdx, bullish, fvgHigh, fvgLow, fvgTimeLeft, fvgTimeRight, fvgRightIdx))
         {
          i = mssIdx;
          continue;
@@ -1074,6 +1126,7 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
       hs.fvgLow          = fvgLow;
       hs.fvgTimeLeft     = fvgTimeLeft;
       hs.fvgTimeRight    = fvgTimeRight;
+      hs.tested          = ZoneTestedAscending(hr, n, fvgRightIdx, mssIdx, fvgLow, fvgHigh, g_symbol.Point(), InpSweepBufferPoints);
 
       DrawSweep(hs);
       DrawMSS(hs);
@@ -1104,7 +1157,7 @@ void ScanHistoryDirection(const MqlRates &hr[], int n, bool bullish)
 //| Same 3-candle FVG search as FindEntryFVG, but for an ascending    |
 //| (oldest-first) historical array.                                  |
 //+------------------------------------------------------------------+
-bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow, datetime &fvgTimeLeft, datetime &fvgTimeRight)
+bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow, datetime &fvgTimeLeft, datetime &fvgTimeRight, int &fvgRightIdx)
   {
    double point = g_symbol.Point();
    double minSize = InpMinFVGSizePoints * point;
@@ -1128,6 +1181,7 @@ bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx,
             fvgHigh     = gapLow;
             fvgTimeLeft  = r[i - 1].time;
             fvgTimeRight = r[i + 1].time;
+            fvgRightIdx  = i + 1;
             return true;
            }
         }
@@ -1141,6 +1195,7 @@ bool FindEntryFVGAscending(const MqlRates &r[], int n, int sweepIdx, int mssIdx,
             fvgHigh     = gapLow;
             fvgTimeLeft  = r[i - 1].time;
             fvgTimeRight = r[i + 1].time;
+            fvgRightIdx  = i + 1;
             return true;
            }
         }

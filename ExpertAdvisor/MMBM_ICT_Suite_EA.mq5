@@ -96,6 +96,10 @@ input color  InpColorEntry        = clrGoldenrod;  // Entry line color
 input color  InpColorSL           = clrRed;        // Stop loss line color
 input color  InpColorTP           = clrLimeGreen;  // Take profit line color
 
+input group "=== History ==="
+input int    InpHistoryDays            = 5;   // Scan and draw completed "ready" setups from the past N days (0 = off)
+input int    InpMaxHistoricalPerSetup  = 5;   // Cap historical drawings per strategy+direction (bounds scan time & object count)
+
 //--- constants (mirror ict.py) ----------------------------------------
 #define FVG_SCAN_BARS    60   // how far back a standalone FVG may be and still count
 #define TURTLE_LOOKBACK  20   // range window for the turtle-soup false-break check
@@ -195,6 +199,9 @@ int OnInit()
 
    if(!InpShowDashboard)
       DeleteObjectsByPrefix(DASH_PREFIX);
+
+   if(InpHistoryDays > 0 && DrawingsAllowed())
+      ScanHistory();
 
    return INIT_SUCCEEDED;
   }
@@ -997,6 +1004,117 @@ void DrawHLine(string name, datetime t1, datetime t2, double price, color col, E
   }
 
 //+------------------------------------------------------------------+
+//| One-shot historical scan: runs once on init (and again whenever  |
+//| an input changes, since that re-fires OnInit) -- never per-tick. |
+//| Single ascending CopyRates fetch is reversed into one descending |
+//| array ONCE, then each "as of bar j" view fed to the live         |
+//| detectors is just a cheap slice of that array, not a fresh       |
+//| CopyRates. Drawings are capped per strategy+direction (no entry/ |
+//| SL/TP lines, 2 objects per find) to keep object count and scan   |
+//| time bounded regardless of how many days are requested.         |
+//+------------------------------------------------------------------+
+void ScanHistory()
+  {
+   DeleteObjectsByPrefix(OBJ_PREFIX + "HIST_");
+
+   datetime fromTime = TimeCurrent() - (long)InpHistoryDays * 86400;
+   MqlRates asc[];
+   ArraySetAsSeries(asc, false);            // ascending: index 0 = oldest
+   int total = CopyRates(_Symbol, InpLTF_Timeframe, fromTime, TimeCurrent(), asc);
+   int k = InpSwingLeftRight;
+   if(total < 2 * k + 30)
+      return;
+
+   int cap = 3000;                          // hard ceiling on worst-case scan cost
+   if(total > cap)
+     {
+      int drop = total - cap;
+      for(int i = 0; i < cap; i++)
+         asc[i] = asc[i + drop];
+      total = cap;
+     }
+
+   MqlRates desc[];
+   ArrayResize(desc, total);
+   for(int i = 0; i < total; i++)
+      desc[i] = asc[total - 1 - i];
+
+   int windowLen = 200;                     // matches the live scan's lookback depth
+   int counts[NUM_SLOTS];
+   datetime lastDrawTime[NUM_SLOTS];
+   for(int i = 0; i < NUM_SLOTS; i++) { counts[i] = 0; lastDrawTime[i] = 0; }
+
+   for(int j = windowLen; j < total - 1; j++)
+     {
+      int pos  = total - 1 - j;
+      int wlen = MathMin(windowLen, total - pos);
+
+      MqlRates win[];
+      ArrayResize(win, wlen);
+      for(int w = 0; w < wlen; w++)
+         win[w] = desc[pos + w];
+
+      for(int n = 0; n < NUM_STRATEGIES; n++)
+        {
+         if(!StrategyEnabled(n))
+            continue;
+         for(int d = 0; d < 2; d++)
+           {
+            bool bull = (d == 0);
+            int slot = SlotIndex(n, bull);
+            if(counts[slot] >= InpMaxHistoricalPerSetup)
+               continue;
+
+            IctSetup s;
+            ZeroMemory(s);
+            if(!RunDetector(n, bull, win, wlen, s))
+               continue;
+            if(s.stage != "ready" || s.zoneTime == lastDrawTime[slot])
+               continue;                    // same persisting setup as the previous bar -- skip duplicate
+
+            DrawHistoricalSetup(s, counts[slot]);
+            counts[slot]++;
+            lastDrawTime[slot] = s.zoneTime;
+           }
+        }
+     }
+  }
+
+void DrawHistoricalSetup(const IctSetup &s, int seq)
+  {
+   string base = OBJ_PREFIX + "HIST_" + s.shortCode + "_" + (s.bullish ? "B" : "S") + "_" + IntegerToString(seq) + "_";
+   color  col  = s.bullish ? InpColorBull : InpColorBear;
+   datetime tRight = s.zoneTime + PeriodSeconds(InpLTF_Timeframe) * InpZoneExtendBars;
+   string tag = "H " + s.shortCode + (s.tested ? " (tested)" : "");
+
+   if(s.isZone)
+     {
+      string zname = base + "Zone";
+      ObjectCreate(0, zname, OBJ_RECTANGLE, 0, s.zoneTime, s.zoneHigh, tRight, s.zoneLow);
+      ObjectSetInteger(0, zname, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, zname, OBJPROP_FILL, false);   // unfilled outline: lighter to render, visually distinct from live zones
+      ObjectSetInteger(0, zname, OBJPROP_BACK, true);
+      ObjectSetInteger(0, zname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_SOLID);
+      ObjectSetInteger(0, zname, OBJPROP_WIDTH, 1);
+     }
+   else
+     {
+      string lname = base + "Level";
+      ObjectCreate(0, lname, OBJ_TREND, 0, s.zoneTime, s.zoneHigh, tRight, s.zoneHigh);
+      ObjectSetInteger(0, lname, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, lname, OBJPROP_STYLE, s.tested ? STYLE_DOT : STYLE_DASH);
+      ObjectSetInteger(0, lname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, lname, OBJPROP_RAY_RIGHT, false);
+     }
+
+   string lblName = base + "Lbl";
+   ObjectCreate(0, lblName, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
+   ObjectSetString(0, lblName, OBJPROP_TEXT, " " + tag);
+   ObjectSetInteger(0, lblName, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 7);
+  }
+
+//+------------------------------------------------------------------+
 //| Dashboard                                                        |
 //+------------------------------------------------------------------+
 void EnsureDashboardObjects()
@@ -1008,7 +1126,7 @@ void EnsureDashboardObjects()
    // Title, Mode, TF, Bias, 7 strategy rows, Acct, Pos, Spread
    string rows[] = {"Title","Mode","TF","Bias",
                     "S0","S1","S2","S3","S4","S5","S6",
-                    "Acct","Pos","Spread"};
+                    "Acct","Pos","Spread","Hist"};
 
    ObjectCreate(0, DASH_PREFIX + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -1109,5 +1227,6 @@ void UpdateDashboard()
    SetDashLine("Pos",   "Open: " + IntegerToString(posCount) + " (" + DoubleToString(posLots, 2) + " lots)  P/L " + DoubleToString(posPnL, 2),
                posPnL >= 0 ? clrLimeGreen : clrRed);
    SetDashLine("Spread","Spread: " + IntegerToString((int)g_symbol.Spread()) + " pts (max " + IntegerToString(InpMaxSpreadPoints) + ")", clrWhite);
+   SetDashLine("Hist",  InpHistoryDays > 0 ? ("History: last " + IntegerToString(InpHistoryDays) + "d drawn") : "History: off", clrSilver);
   }
 //+------------------------------------------------------------------+

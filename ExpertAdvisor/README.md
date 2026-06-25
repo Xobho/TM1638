@@ -27,6 +27,12 @@ File: [`MMBM_LiquiditySweep_EA.mq5`](MMBM_LiquiditySweep_EA.mq5)
    diagram). A limit order is placed inside it — either at the midpoint
    (`InpEntryAtMidpoint = true`, the ICT "consequent encroachment") or at the
    far edge of the gap (more favorable price, lower fill probability).
+   Each FVG also carries a **tested** flag — true if price already wicked
+   back into the zone at some point between the FVG forming and the MSS
+   confirming (a used-up zone, drawn with a dotted outline and "(tested)" in
+   its label instead of a solid one). `InpSkipTestedFVG` (default off) can
+   skip placing the order entirely on a tested FVG, for a stricter,
+   fresh-zones-only filter.
 5. **Risk**: stop loss sits beyond the sweep extreme plus a buffer
    (`InpSweepBufferPoints`); take profit targets the next external liquidity
    pool (opposing swing point) found ahead of price, falling back to a fixed
@@ -154,6 +160,7 @@ The current mode is shown on the first line of the on-chart status comment
 | `InpClearInvalidatedSteps` | Auto-remove drawings for setups that never filled |
 | `InpDeleteObjectsOnRemove` | Wipe all EA drawings when removed from the chart |
 | `InpHistoryDays` | Days of history to scan and draw on init (0 = off) |
+| `InpSkipTestedFVG` | Skip the entry if the FVG was already wicked back into before MSS confirmed |
 
 ## Ideas to make the strategy more effective
 
@@ -267,4 +274,29 @@ always, MT5's terminal-level "AutoTrading" button must also be enabled.
 This is intentionally a simpler execution model than the other EA's pending
 limits — it's meant as a starting point to forward-test the suite on a demo
 and adjust. Backtest before risking real funds.
+
+## Seeing history
+
+Like the single-strategy EA, this one can backfill the chart with completed
+setups from before it was attached:
+
+- `InpHistoryDays` (default 5, `0` disables it) and `InpMaxHistoricalPerSetup`
+  (default 5) control how far back to scan and how many historical finds to
+  draw per strategy+direction (14 slots total) — that cap, plus only drawing
+  the zone/level + a label (no entry/SL/TP lines), is what keeps the scan from
+  creating hundreds of objects across all seven strategies.
+- The scan runs **once**, in `OnInit` (on attach, or whenever you open Inputs
+  and click OK — MT5 re-fires `OnInit` on any input change) — never per-tick,
+  so it can't slow down live chart updates. It fetches the historical bars
+  with a single `CopyRates` call, builds one descending copy of that range,
+  and then walks it bar-by-bar feeding each of the seven detectors a cheap
+  slice of that one array — no repeated history fetches per strategy.
+  Only `stage == "ready"` finds are drawn, and a persisting setup (same zone,
+  many consecutive "ready" bars) only counts once.
+- Historical objects use the `ICTS_HIST_<CODE>_<B|S>_<n>_` prefix (vs.
+  `ICTS_<CODE>_<B|S>_` for live ones) so the two never collide, and are drawn
+  as an unfilled outline (dotted if `tested`) to stay visually distinct from
+  the live, filled zones.
+- Like the live scanner, historical setups are **not** filtered by HTF bias
+  and never place real orders — visual review only.
 
