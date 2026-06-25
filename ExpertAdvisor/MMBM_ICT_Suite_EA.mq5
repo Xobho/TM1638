@@ -63,6 +63,14 @@ enum ENUM_TRIGGER_MODE
    TRIGGER_TOUCH = 1    // Touch: fire the instant live price (incl. a wick) reaches into the zone
   };
 
+//--- where inside the retest zone the entry price sits ----------------
+enum ENUM_ENTRY_MODE
+  {
+   ENTRY_FIRST_TOUCH = 0,  // Proximal edge: the wick's FIRST touch of the zone (no waiting for a deeper fill)
+   ENTRY_MIDPOINT    = 1,  // 50% of the zone (consequent encroachment / CE)
+   ENTRY_FAR_EDGE    = 2   // Distal edge: the deepest fill at the far side of the zone
+  };
+
 //--- inputs -----------------------------------------------------------
 input ENUM_TIMEFRAMES InpHTF_Timeframe        = PERIOD_H4;   // Higher timeframe used for directional bias
 input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_M15;  // Entry timeframe (all detection runs here)
@@ -71,7 +79,7 @@ input bool            InpRequireHTFBias       = true;        // Only show/trade 
 input int             InpMaxBarsAfterSweep    = 25;          // Max bars a sweep/break may be old and still count
 input int             InpMaxBarsForFVGSearch  = 15;          // How far back from the MSS bar to search the entry FVG
 input double          InpMinFVGSizePoints     = 30;          // Minimum FVG size (points) to be tradable
-input bool            InpEntryAtMidpoint      = true;        // SWEEP entry at 50% of FVG (false = far edge)
+input ENUM_ENTRY_MODE InpEntryMode            = ENTRY_FIRST_TOUCH; // Entry price inside the zone: first-touch (wick) / midpoint / far edge
 input double          InpSweepBufferPoints    = 20;          // Stop buffer + zone tolerance (points) for all strategies
 input double          InpFallbackRR           = 2.0;         // Reward:Risk used when no liquidity target is found
 
@@ -281,6 +289,13 @@ void ScanAllStrategies()
          IctSetup s;
          ZeroMemory(s);
          bool found = allowed && RunDetector(n, bull, rates, total, s);
+
+         // Premium/Discount is a hard filter here, not just a trade-time gate:
+         // a setup whose entry is in the wrong half of the dealing range
+         // (buy in premium / sell in discount) is rejected outright -- it is
+         // neither drawn nor traded.
+         if(found && !PremiumDiscountOK(s))
+            found = false;
 
          if(found)
            {
@@ -559,8 +574,17 @@ void ComputeZoneTrade(const MqlRates &r[], int total, bool bullish,
                       double &entry, double &sl, double &tp)
   {
    double pt = g_symbol.Point();
-   entry = InpEntryAtMidpoint ? (zoneHi + zoneLo) / 2.0
-                              : (bullish ? zoneLo : zoneHi);
+   // Proximal edge = the side price reaches FIRST on the retest: the top of
+   // the zone for a bullish setup (price drops into it from above), the bottom
+   // for a bearish setup (price rallies into it from below).
+   double proximal = bullish ? zoneHi : zoneLo;
+   double distal   = bullish ? zoneLo : zoneHi;
+   switch(InpEntryMode)
+     {
+      case ENTRY_MIDPOINT: entry = (zoneHi + zoneLo) / 2.0; break;
+      case ENTRY_FAR_EDGE: entry = distal;                  break;
+      default:             entry = proximal;                break;  // ENTRY_FIRST_TOUCH
+     }
    sl = bullish ? sweepExtreme - InpSweepBufferPoints * pt
                 : sweepExtreme + InpSweepBufferPoints * pt;
    double slDist = MathAbs(entry - sl);

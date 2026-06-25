@@ -289,16 +289,26 @@ As always, MT5's terminal-level "AutoTrading" button must also be enabled.
 
 - **`TRIGGER_TOUCH`** (default) — checked **every tick**. The instant live
   price (including just a wick) reaches into the zone band
-  (`zoneLow .. zoneHigh` ± `InpSweepBufferPoints`), the trade fires. Catches
-  fast touches that reverse before the candle closes. The setups themselves are
-  still *detected* only on closed bars (no repaint) — only the entry trigger is
-  intrabar.
+  (`zoneLow .. zoneHigh` ± `InpSweepBufferPoints`), the trade fires — **the
+  entry is the first touch / wick into the zone on the retest; it does NOT
+  wait for the candle to close.** Catches fast touches that reverse before the
+  candle closes. The setups themselves are still *detected* only on closed bars
+  (no repaint) — only the entry trigger is intrabar.
 - **`TRIGGER_CLOSE`** — checked only on **bar close**. A candle must actually
   *close* inside the zone (`stage == ready`) before the trade fires. Fewer,
-  cleaner entries; ignores wick-and-reverse touches. This was the original
-  behavior.
+  cleaner entries; ignores wick-and-reverse touches.
 
 The active mode shows on the dashboard's Mode line, e.g. `AUTO-TRADE (touch)`.
+
+`InpEntryMode` decides *where inside the zone* the entry price (and therefore
+the displayed reward:risk) sits:
+
+- **`ENTRY_FIRST_TOUCH`** (default) — the **proximal edge**, the side price
+  reaches first on the retest (the zone's top for a buy, its bottom for a
+  sell). Pairs with `TRIGGER_TOUCH` so the order fires on that first wick.
+- **`ENTRY_MIDPOINT`** — 50% of the zone (the ICT "consequent encroachment").
+- **`ENTRY_FAR_EDGE`** — the distal edge, holding out for the deepest fill
+  (better price, but the zone may never fill that far).
 
 This is intentionally a simpler execution model than the other EA's pending
 limits — it's meant as a starting point to forward-test the suite on a demo
@@ -315,8 +325,8 @@ half of the range, or in a dead session). Both are on by default:
   from the high/low of the last `InpPDRangeBars` bars (default 50); its 50%
   is equilibrium. **Buys are only allowed at/below equilibrium (discount),
   sells at/above (premium)** — the core ICT rule that you buy cheap and sell
-  expensive within the range. Setups that fail this are still drawn, just not
-  traded.
+  expensive within the range. This is a **hard filter applied at detection**:
+  a setup in the wrong half is rejected outright — neither drawn nor traded.
 - **Killzones** (`InpUseKillzones`): trades fire only inside two configurable
   session windows — `InpKZ1StartHour..InpKZ1EndHour` (London) and
   `InpKZ2StartHour..InpKZ2EndHour` (New York). **Hours are broker/SERVER
