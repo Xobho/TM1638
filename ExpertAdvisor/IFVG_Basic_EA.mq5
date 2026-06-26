@@ -104,6 +104,8 @@ int      g_btNoFill   = 0;
 double   g_btTotalR   = 0.0;
 double   g_btGrossWin = 0.0;   // sum of +R on winners (for profit factor)
 
+MqlRates g_htf[];              // cached higher-timeframe bars (for as-of-time bias)
+
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
   {
@@ -143,6 +145,7 @@ int OnInit()
 
    g_lastBar = 0;
    Scan();                 // draw immediately on attach, don't wait for a tick
+   EventSetTimer(1);       // keep the dashboard live even when no ticks arrive
    ChartRedraw(0);
    return INIT_SUCCEEDED;
   }
@@ -150,10 +153,25 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   EventKillTimer();
    if(g_atr != INVALID_HANDLE)
       IndicatorRelease(g_atr);
    ObjectsDeleteAll(0, PFX);
    Comment("");
+  }
+
+//+------------------------------------------------------------------+
+//| Refresh the dashboard's LIVE fields (auto-trade status, account,  |
+//| spread) once a second, so toggling the Algo button or the market  |
+//| opening/closing shows up even with no incoming ticks.             |
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+   if(InpShowDashboard)
+     {
+      Dashboard();
+      ChartRedraw(0);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -213,38 +231,56 @@ int HoursToBars(double hours)
   }
 
 //+------------------------------------------------------------------+
-//| Step 1: HTF bias from the higher timeframe's last two swings.     |
+//| Load enough HTF bars to judge bias anywhere in the scan/backtest  |
+//| window (cached in g_htf, refreshed once per scan).                 |
 //+------------------------------------------------------------------+
-void ComputeHTFBias()
+void EnsureHTFData()
   {
-   g_htfUp = true; g_htfDown = true;
-   if(!InpUseHTFBias)
-      return;
+   ArraySetAsSeries(g_htf, true);
+   double days = MathMax((double)InpBacktestDays, InpLookbackHours / 24.0) + 2.0;
+   int bars = (int)MathRound(days * 24.0 * 3600.0 / PeriodSeconds(InpHTF)) + 6 * InpSwingBars + 20;
+   bars = (int)MathMax(60.0, MathMin(5000.0, (double)bars));
+   CopyRates(_Symbol, InpHTF, 0, bars, g_htf);
+  }
 
-   MqlRates h[];
-   ArraySetAsSeries(h, true);
-   int n = CopyRates(_Symbol, InpHTF, 1, 6 * InpSwingBars + 50, h);
+//+------------------------------------------------------------------+
+//| Step 1: HTF bias AS OF time t -- using only the HTF swings that   |
+//| had formed by then, so a historical setup is judged by its own    |
+//| day's trend, not today's. Neutral (both true) until 2 swings each. |
+//+------------------------------------------------------------------+
+void HTFBiasAt(datetime t, bool &up, bool &down)
+  {
+   up = true; down = true;
+   int n = ArraySize(g_htf);
    if(n < 4 * InpSwingBars + 4)
       return;
 
-   double hi[]; double lo[];
-   ArrayResize(hi, 0); ArrayResize(lo, 0);
-   for(int i = InpSwingBars; i < n - InpSwingBars; i++)
+   int start = -1;                                  // first HTF bar at/older than t
+   for(int i = 0; i < n; i++)
+      if(g_htf[i].time <= t) { start = i; break; }
+   if(start < 0)
+      return;
+
+   double hi[2], lo[2]; int hc = 0, lc = 0;
+   for(int i = start + InpSwingBars; i < n - InpSwingBars; i++)   // confirmed-by-t swings, newest first
      {
-      if(IsSwingHigh(h, i, InpSwingBars) && ArraySize(hi) < 2)
-        { int s = ArraySize(hi); ArrayResize(hi, s + 1); hi[s] = h[i].high; }
-      if(IsSwingLow(h, i, InpSwingBars) && ArraySize(lo) < 2)
-        { int s = ArraySize(lo); ArrayResize(lo, s + 1); lo[s] = h[i].low; }
-      if(ArraySize(hi) >= 2 && ArraySize(lo) >= 2) break;
+      if(hc >= 2 && lc >= 2) break;
+      if(hc < 2 && IsSwingHigh(g_htf, i, InpSwingBars)) hi[hc++] = g_htf[i].high;
+      if(lc < 2 && IsSwingLow (g_htf, i, InpSwingBars)) lo[lc++] = g_htf[i].low;
      }
-   if(ArraySize(hi) < 2 || ArraySize(lo) < 2)
+   if(hc < 2 || lc < 2)
       return;
 
    bool hh = hi[0] > hi[1], hl = lo[0] > lo[1];
    bool lh = hi[0] < hi[1], ll = lo[0] < lo[1];
-   if(hh && hl)      { g_htfUp = true;  g_htfDown = false; }
-   else if(lh && ll) { g_htfUp = false; g_htfDown = true;  }
-   // mixed -> both stay true (neutral)
+   if(hh && hl)      { up = true;  down = false; }
+   else if(lh && ll) { up = false; down = true;  }
+   // mixed -> neutral (both stay true)
+  }
+
+void ComputeHTFBias()                               // current bias, for the dashboard display
+  {
+   HTFBiasAt(TimeCurrent(), g_htfUp, g_htfDown);
   }
 
 //+------------------------------------------------------------------+
@@ -369,11 +405,13 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups)
            }
          if(failed) continue;
 
-         // Step 1: HTF bias filter.
+         // Step 1: HTF bias filter -- judged AS OF this setup's break, so an
+         // older setup is filtered by its own day's trend, not today's.
          if(InpUseHTFBias)
            {
-            if(bearish  && !g_htfDown) continue;
-            if(!bearish && !g_htfUp)   continue;
+            bool bUp, bDown; HTFBiasAt(r[brk].time, bUp, bDown);
+            if(bearish  && !bDown) continue;
+            if(!bearish && !bUp)   continue;
            }
 
          // Confluences.
@@ -976,6 +1014,7 @@ void Scan()
    if(total < 2 * InpSwingBars + 10)
       return;
 
+   EnsureHTFData();      // refresh HTF cache before any bias lookups
    ComputeHTFBias();
 
    // wipe last pass (setups + structure + liquidity), keep the dashboard
