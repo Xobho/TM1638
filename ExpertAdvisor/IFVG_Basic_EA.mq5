@@ -69,6 +69,10 @@ input color  InpExtLiqColor              = clrOrangeRed;
 input color  InpIntLiqColor              = clrSlateGray;
 input color  InpEqualLiqColor            = clrMediumOrchid;
 
+input group "=== Backtest (on-chart win/loss) ==="
+input bool   InpShowBacktest             = true;        // Tally TP-vs-SL outcomes across the window
+input int    InpBacktestDays             = 14;          // How many days back to evaluate
+
 //=== Globals =========================================================
 #define PFX  "IFVGB_"
 #define DPFX "IFVGB_DASH_"
@@ -80,6 +84,13 @@ bool     g_htfDown    = true;
 int      g_lastBull   = 0;     // counts for the dashboard
 int      g_lastBear   = 0;
 
+// backtest tally (filled by RunBacktest, shown on the dashboard)
+int      g_btWins   = 0;
+int      g_btLosses = 0;
+int      g_btOpen   = 0;
+int      g_btNoFill = 0;
+double   g_btTotalR = 0.0;
+
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
   {
@@ -89,6 +100,7 @@ struct IFVGSetup
    double   gapHigh;
    datetime gapTime;       // left anchor (the older of the 3 gap candles)
    datetime breakTime;     // candle that CLOSED through (the inversion)
+   int      breakIdx;      // its bar index (for the outcome walk-forward)
    double   breakLevel;    // the gap edge that was closed through
    bool     hadSweep;
    datetime sweepTime;
@@ -290,7 +302,7 @@ bool FindLiquidityTarget(const MqlRates &r[], int total, bool forLong, double en
 //+------------------------------------------------------------------+
 //| Core: scan the window for inverted FVGs (most recent first).      |
 //+------------------------------------------------------------------+
-int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[])
+int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups)
   {
    ArrayResize(out, 0);
    double atr = GetATR();
@@ -301,7 +313,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[])
 
    for(int m = 1; m < total - 1; m++)
      {
-      if(ArraySize(out) >= InpMaxSetups) break;
+      if(ArraySize(out) >= maxSetups) break;
 
       for(int dir = 0; dir < 2; dir++)
         {
@@ -367,7 +379,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[])
          IFVGSetup s; ZeroMemory(s);
          s.valid = true; s.bullish = !bearish;
          s.gapLow = gapLow; s.gapHigh = gapHigh; s.gapTime = r[m + 1].time;
-         s.breakTime = r[brk].time; s.breakLevel = bearish ? gapLow : gapHigh;
+         s.breakTime = r[brk].time; s.breakIdx = brk; s.breakLevel = bearish ? gapLow : gapHigh;
          s.hadSweep = hadSweep; s.sweepTime = swTime; s.sweepLevel = swLevel; s.sweepExtreme = swExtreme;
          s.hadMSS = hadMSS; s.mssTime = mssTime; s.mssLevel = mssLevel;
 
@@ -655,7 +667,7 @@ void Dashboard()
   {
    if(!InpShowDashboard) { ObjectsDeleteAll(0, DPFX); return; }
 
-   string rows[] = {"Title", "Bias", "Conf", "Setups", "Note"};
+   string rows[] = {"Title", "Bias", "Conf", "Setups", "BTest", "Note"};
    int x = 12, y = 18, rowH = 16;
    if(ObjectFind(0, DPFX + "BG") < 0)
      {
@@ -697,7 +709,72 @@ void Dashboard()
    ObjectSetString(0, DPFX + "Bias",   OBJPROP_TEXT, "HTF " + EnumToString(InpHTF) + " bias: " + bias);
    ObjectSetString(0, DPFX + "Conf",   OBJPROP_TEXT, conf);
    ObjectSetString(0, DPFX + "Setups", OBJPROP_TEXT, "Drawn: " + IntegerToString(g_lastBull) + " bull, " + IntegerToString(g_lastBear) + " bear");
+
+   if(InpShowBacktest)
+     {
+      int    tot = g_btWins + g_btLosses;
+      double wr  = (tot > 0) ? 100.0 * g_btWins / tot : 0.0;
+      ObjectSetString(0, DPFX + "BTest", OBJPROP_TEXT,
+         StringFormat("BT %dd: %dW/%dL (%.0f%%)  %+.1fR  %d open", InpBacktestDays, g_btWins, g_btLosses, wr, g_btTotalR, g_btOpen));
+      ObjectSetInteger(0, DPFX + "BTest", OBJPROP_COLOR, (g_btTotalR >= 0 ? clrLimeGreen : clrRed));
+     }
+   else
+      ObjectSetString(0, DPFX + "BTest", OBJPROP_TEXT, "Backtest: off");
+
    ObjectSetString(0, DPFX + "Note",   OBJPROP_TEXT, "Chart " + EnumToString((ENUM_TIMEFRAMES)_Period) + "  (scan only, no orders)");
+  }
+
+//+------------------------------------------------------------------+
+//| On-chart backtest: for EVERY setup in the window, find where its  |
+//| entry was first touched, then walk forward to see whether SL or   |
+//| TP was hit first. Tally W/L/open + total R. No orders, no tester. |
+//| Simplifications: SL-first on an ambiguous bar (both inside one     |
+//| candle), spread/slippage ignored, overlapping setups counted      |
+//| independently. It's an edge read, not a broker-accurate report.   |
+//+------------------------------------------------------------------+
+void RunBacktest()
+  {
+   g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0;
+   if(!InpShowBacktest)
+      return;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int want  = (int)MathMax(1.0, MathRound(InpBacktestDays * 24.0 * 3600.0 / PeriodSeconds(_Period)));
+   int total = CopyRates(_Symbol, _Period, 1, want, r);
+   if(total < 2 * InpSwingBars + 10)
+      return;
+
+   IFVGSetup sx[];
+   int n = FindIFVGs(r, total, sx, 100000);     // ALL setups, not just the drawn few
+   for(int i = 0; i < n; i++)
+     {
+      bool buy = sx[i].bullish;
+      int  brk = sx[i].breakIdx;
+
+      // Entry fill: first bar after the break that reaches the entry edge.
+      int tj = -1;
+      for(int j = brk - 1; j >= 0; j--)
+        {
+         if(buy  && r[j].low  <= sx[i].entry) { tj = j; break; }
+         if(!buy && r[j].high >= sx[i].entry) { tj = j; break; }
+        }
+      if(tj < 0) { g_btNoFill++; continue; }     // never filled -> not a trade
+
+      // Outcome: from the fill bar forward, SL or TP first?
+      int oc = 0;                                // 0 open, +1 win, -1 loss
+      for(int k = tj; k >= 0; k--)
+        {
+         bool hitSL = buy ? (r[k].low  <= sx[i].sl) : (r[k].high >= sx[i].sl);
+         bool hitTP = buy ? (r[k].high >= sx[i].tp) : (r[k].low  <= sx[i].tp);
+         if(hitSL) { oc = -1; break; }            // SL checked first = conservative tie-break
+         if(hitTP) { oc =  1; break; }
+        }
+
+      if(oc == 1)      { g_btWins++;   g_btTotalR += sx[i].rr; }
+      else if(oc == -1){ g_btLosses++; g_btTotalR -= 1.0; }
+      else               g_btOpen++;
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -723,7 +800,7 @@ void Scan()
    DrawStructure(r, total);
 
    IFVGSetup setups[];
-   int n = FindIFVGs(r, total, setups);
+   int n = FindIFVGs(r, total, setups, InpMaxSetups);
    g_lastBull = 0; g_lastBear = 0;
    for(int i = 0; i < n; i++)
      {
@@ -731,6 +808,7 @@ void Scan()
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
 
+   RunBacktest();
    Dashboard();
   }
 //+------------------------------------------------------------------+
