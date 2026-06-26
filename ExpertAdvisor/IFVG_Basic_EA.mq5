@@ -737,8 +737,15 @@ void Dashboard()
    else
       ObjectSetString(0, DPFX + "BTest", OBJPROP_TEXT, "Backtest: off");
 
-   string mode = InpAutoTrade ? ("AUTO-TRADE lot " + DoubleToString(InpLotSize, 2) + (TradingAllowed() ? "" : " [blocked]"))
-                              : "scan only (no orders)";
+   string mode;
+   if(!InpAutoTrade)
+      mode = "scan only (no orders)";
+   else
+     {
+      string br = TradeBlockReason();
+      mode = (br == "") ? ("AUTO-TRADE lot " + DoubleToString(InpLotSize, 2))
+                        : ("AUTO-TRADE blocked: " + br);
+     }
    ObjectSetString(0, DPFX + "Note",   OBJPROP_TEXT, "Chart " + EnumToString((ENUM_TIMEFRAMES)_Period) + "  (" + mode + ")");
    ObjectSetInteger(0, DPFX + "Note",  OBJPROP_COLOR, InpAutoTrade ? clrOrange : clrSilver);
   }
@@ -804,14 +811,21 @@ void RunBacktest()
 //| and the terminal/account/symbol all allow trading (so it only acts |
 //| when the market is actually open and Algo Trading is enabled).     |
 //+------------------------------------------------------------------+
+// "" = clear to trade; otherwise the exact reason MT5 is blocking us.
+string TradeBlockReason()
+  {
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))                                                          return "no connection";
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                                                                return "Algo Trading button OFF";
+   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))                                                  return "account trading off";
+   ENUM_SYMBOL_TRADE_MODE tm = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(tm == SYMBOL_TRADE_MODE_DISABLED)                                                                  return "symbol trading disabled";
+   if(tm == SYMBOL_TRADE_MODE_CLOSEONLY)                                                                 return "symbol close-only (market closed?)";
+   return "";
+  }
+
 bool TradingAllowed()
   {
-   if(!InpAutoTrade)                                                              return false;
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED))                                   return false;
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                                         return false;
-   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))                           return false;
-   if((ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED) return false;
-   return true;
+   return InpAutoTrade && TradeBlockReason() == "";
   }
 
 int CountMyOrders()
