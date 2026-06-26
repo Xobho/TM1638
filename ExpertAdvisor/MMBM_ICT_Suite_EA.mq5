@@ -725,19 +725,24 @@ int CollectSweepBOS(const MqlRates &r[], int total, bool bullish, SeqSweepBOS &o
 //+------------------------------------------------------------------+
 string DiagSweepBOS(const MqlRates &r[], int total, bool bullish)
   {
+   int dg = g_symbol.Digits();
    SeqSweepBOS seqs[];
    int n = CollectSweepBOS(r, total, bullish, seqs);
    if(n > 0)
-      return StringFormat("%d seq (sw@%d)", n, seqs[0].sweepIdx);
+      return StringFormat("%d seq (sw@%d %s)", n, seqs[0].sweepIdx,
+                           DoubleToString(seqs[0].sweepExtreme, dg));
 
    // No full sequence -- report how far the nearest single path got, so the
    // dashboard still says WHY (no pool swept / swept-but-stale / swept-no-BOS).
+   // Prices are included (not just the bar index) so you can find the exact
+   // sweep wick / pool level on the chart instead of counting bars back.
    int sweepIdx; double sweepPrice, liqLevel; datetime liqTime;
    if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
       return "no sweep";
+   string pricePart = DoubleToString(sweepPrice, dg) + " thru " + DoubleToString(liqLevel, dg);
    if(sweepIdx > HoursToBars(InpSweepFreshnessHours))
-      return StringFormat("stale sw@%d", sweepIdx);
-   return StringFormat("sw@%d no BOS", sweepIdx);
+      return StringFormat("stale sw@%d %s", sweepIdx, pricePart);
+   return StringFormat("sw@%d %s no BOS", sweepIdx, pricePart);
   }
 
 //+------------------------------------------------------------------+
@@ -1323,9 +1328,9 @@ void EnsureDashboardObjects()
    if(ObjectFind(0, DASH_PREFIX + "BG") >= 0)
       return;
 
-   int x = 10, y = 20, w = 360, rowH = 16;
+   int x = 10, y = 20, w = 400, rowH = 16;
    // Title, Mode, TF, Bias, Ctx, 3 strategy rows, Acct, Pos, Spread, Hist
-   string rows[] = {"Title","Mode","TF","Bias","Ctx","Diag",
+   string rows[] = {"Title","Mode","TF","Bias","Ctx","DiagB","DiagS",
                     "S0","S1","S2",
                     "Acct","Pos","Spread","Hist"};
 
@@ -1460,7 +1465,8 @@ void UpdateDashboard()
      }
    color ctxCol = (InpUseKillzones && !kzOn) ? clrOrange : clrAqua;
    SetDashLine("Ctx", "Ctx: " + kzTxt + " | " + pdTxt, ctxCol);
-   SetDashLine("Diag", "Gate B:" + g_diagBull + " S:" + g_diagBear, clrYellow);
+   SetDashLine("DiagB", "Gate B: " + g_diagBull, clrYellow);
+   SetDashLine("DiagS", "Gate S: " + g_diagBear, clrYellow);
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
       SetDashLine("S" + IntegerToString(n), StrategyRowText(n), StrategyRowColor(n));
