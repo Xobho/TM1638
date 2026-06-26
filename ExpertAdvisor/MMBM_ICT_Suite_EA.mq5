@@ -971,40 +971,37 @@ bool BuildSetup_IFVG(const MqlRates &r[], int total, bool bullish, const SeqSwee
 //+------------------------------------------------------------------+
 bool BuildSetup_Breaker(const MqlRates &r[], int total, bool bullish, const SeqSweepBOS &q, IctSetup &o)
   {
-   int sweepIdx = q.sweepIdx, bosIdx = q.bosIdx;
+   int sweepIdx = q.sweepIdx;
    double sweepExtreme = q.sweepExtreme, sweepLevel = q.sweepLevel, bosLevel = q.bosLevel;
    datetime sweepTime = q.sweepTime, bosTime = q.bosTime;
 
-   int loI = bosIdx + 1, hiI = sweepIdx;          // the leg that built the swept extreme
-   if(loI > hiI) return false;
+   // The breaker is the order block the BOS displacement VIOLATED and flipped:
+   //  - bearish setup -> the last DOWN-close candle (the demand / bullish OB)
+   //    that fed the rally into the swept high; once price CLOSES BELOW it the
+   //    block flips to resistance and is retested from below.
+   //  - bullish setup -> the last UP-close candle (the supply / bearish OB)
+   //    that fed the drop into the swept low; once price CLOSES ABOVE it the
+   //    block flips to support and is retested from above.
+   // Scan back through the leg from the swept extreme and take the FIRST such
+   // candle that actually got closed through -- that close-through IS the flip.
+   int lookback = HoursToBars(InpMaxFVGSearchHours);
+   int oldest   = MathMin(sweepIdx + lookback, total - 2);
+   int ob = -1, flip = -1;
+   for(int oo = sweepIdx; oo <= oldest; oo++)
+     {
+      if(oo < 1) continue;
+      bool isOB = bullish ? (r[oo].close > r[oo].open) : (r[oo].close < r[oo].open);
+      if(!isOB) continue;                                  // wrong-colour candle -> skip
 
-   // The breaker is the OPPOSING order block inside that leg: for a bullish
-   // setup it's the lowest down-candle; for a bearish setup the highest
-   // up-candle. That candle pushed price into the liquidity that got swept.
-   int ob = -1;
-   if(bullish)
-     {
-      double best = DBL_MAX;
-      for(int oo = loI; oo <= hiI; oo++)
-         if(r[oo].close < r[oo].open && r[oo].low < best) { best = r[oo].low; ob = oo; }
-     }
-   else
-     {
-      double best = -DBL_MAX;
-      for(int oo = loI; oo <= hiI; oo++)
-         if(r[oo].close > r[oo].open && r[oo].high > best) { best = r[oo].high; ob = oo; }
+      int f = -1;
+      for(int j = oo - 1; j >= 0; j--)                     // a later candle must close through
+        {
+         if(bullish  && r[j].close > r[oo].high) { f = j; break; } // closed ABOVE => violated
+         if(!bullish && r[j].close < r[oo].low ) { f = j; break; } // closed BELOW => violated
+        }
+      if(f >= 0) { ob = oo; flip = f; break; }             // first violated OB = the breaker
      }
    if(ob < 0) return false;
-
-   // It only becomes a BREAKER once the OB has been VIOLATED -- a later candle
-   // must have CLOSED through it in the BOS direction. That flip is the setup.
-   int flip = -1;
-   for(int j = ob - 1; j >= 0; j--)
-     {
-      if(bullish  && r[j].close > r[ob].high) { flip = j; break; }
-      if(!bullish && r[j].close < r[ob].low ) { flip = j; break; }
-     }
-   if(flip < 0) return false;
 
    double zoneLo = r[ob].low, zoneHi = r[ob].high;
    FillSetupCommon(o, 2, bullish);
