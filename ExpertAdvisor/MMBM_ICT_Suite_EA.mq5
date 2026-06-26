@@ -77,7 +77,8 @@ input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_M15;  // Entry timeframe 
 input int             InpSwingLeftRight       = 3;           // Bars each side to confirm a general structure swing
 input int             InpLiquiditySwingBars   = 5;           // Bars each side to confirm a PROPER swing for the sweep / BOS / TP liquidity (>= InpSwingLeftRight = stronger, more significant pivots)
 input bool            InpRequireHTFBias       = true;        // Only show/trade setups aligned with HTF structure
-input int             InpMaxBarsAfterSweep    = 25;          // Max bars a sweep/break may be old and still count
+input double          InpLookbackHours        = 72.0;        // How far back (hours) the live scan searches for liquidity pools/structure -- a pool can take days to build, so this is time-based, not a fixed bar count
+input double          InpSweepFreshnessHours  = 6.0;         // Max age (hours) a sweep/break may be and still count as a live, tradable setup
 input int             InpMaxBarsForFVGSearch  = 15;          // How far back from the MSS bar to search the entry FVG
 input double          InpMinFVGSizePoints     = 30;          // Minimum FVG size (points) to be tradable
 input ENUM_ENTRY_MODE InpEntryMode            = ENTRY_FIRST_TOUCH; // Entry price inside the zone: first-touch (wick) / midpoint / far edge
@@ -296,9 +297,12 @@ void ScanAllStrategies()
    GetHTFBias(g_htfBullBias, g_htfBearBias);
    ComputePremiumDiscount();
 
+   int lookbackBars = HoursToBars(InpLookbackHours);
+   lookbackBars = (int)MathMin(lookbackBars, 5000);   // hard ceiling so a huge InpLookbackHours on a small TF can't stall a tick
+
    MqlRates rates[];
    ArraySetAsSeries(rates, true);              // index 0 = newest, like ict.py's reversed series
-   int total = CopyRates(_Symbol, InpLTF_Timeframe, 1, 200, rates);
+   int total = CopyRates(_Symbol, InpLTF_Timeframe, 1, lookbackBars, rates);
    if(total < 2 * InpSwingLeftRight + 10)
       return;
 
@@ -416,6 +420,18 @@ void GetHTFBias(bool &bullBias, bool &bearBias)
    if(higherHigh && higherLow)      { bullBias = true;  bearBias = false; }
    else if(lowerHigh && lowerLow)   { bullBias = false; bearBias = true;  }
    // else mixed -> both remain true
+  }
+
+//+------------------------------------------------------------------+
+//| Hours -> bars for the current LTF, so lookback/freshness scale    |
+//| with the chart period instead of meaning a different real-world   |
+//| duration whenever InpLTF_Timeframe changes.                       |
+//+------------------------------------------------------------------+
+int HoursToBars(double hours)
+  {
+   int secs = PeriodSeconds(InpLTF_Timeframe);
+   if(secs <= 0) return 1;
+   return (int)MathMax(1.0, MathRound(hours * 3600.0 / secs));
   }
 
 //+------------------------------------------------------------------+
@@ -578,7 +594,7 @@ bool FindSweepBOS(const MqlRates &r[], int total, bool bullish,
    double sweepPrice, liqLevel; datetime liqTime;
    if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
       return false;
-   if(sweepIdx > InpMaxBarsAfterSweep)
+   if(sweepIdx > HoursToBars(InpSweepFreshnessHours))
       return false;
    sweepExtreme = sweepPrice;     // the wick extreme -- the stop sits beyond THIS
    sweepLevel   = liqLevel;       // the raided liquidity level -- the Sweep line sits HERE
@@ -603,8 +619,9 @@ string DiagSweepBOS(const MqlRates &r[], int total, bool bullish)
    int sweepIdx; double sweepPrice, liqLevel; datetime liqTime;
    if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
       return "no sweep";
-   if(sweepIdx > InpMaxBarsAfterSweep)
-      return StringFormat("sweep@%d>max%d", sweepIdx, InpMaxBarsAfterSweep);
+   int maxBars = HoursToBars(InpSweepFreshnessHours);
+   if(sweepIdx > maxBars)
+      return StringFormat("sweep@%d>max%d", sweepIdx, maxBars);
 
    int mssIdx, refIdx; double mssLevel;
    if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel, refIdx))
@@ -1118,7 +1135,7 @@ void ScanHistory()
    for(int i = 0; i < total; i++)
       desc[i] = asc[total - 1 - i];
 
-   int windowLen = 200;                     // matches the live scan's lookback depth
+   int windowLen = HoursToBars(InpLookbackHours);   // matches the live scan's lookback depth
    int counts[NUM_SLOTS];
    datetime lastDrawTime[NUM_SLOTS];
    for(int i = 0; i < NUM_SLOTS; i++) { counts[i] = 0; lastDrawTime[i] = 0; }
