@@ -1282,27 +1282,34 @@ void DrawHLine(string name, datetime t1, datetime t2, double price, color col, E
 //| Sweep -> BOS -> retest story is visible, not just the zone box.  |
 //| Shared by both the live and historical drawing paths.            |
 //+------------------------------------------------------------------+
-void DrawSetupLines(string base, const IctSetup &s, datetime tRight)
+void DrawSetupLines(string base, const IctSetup &s, datetime tRight, bool shared=true)
   {
-   // Sweep/BOS are the SHARED gate every strategy reads, so two or three
-   // strategies often latch onto the exact same sequence. Drawing them under
-   // a content-keyed name (direction + anchor + level) instead of the
-   // per-slot base means identical sequences collapse onto one pair of
-   // lines instead of stacking 2-3 identical copies on top of each other.
-   // Each line also stops at the candle that actually did the poking/
-   // closing, instead of running all the way to "now" past where it
-   // stopped mattering.
+   // LIVE setups (shared=true): Sweep/BOS are the shared gate every strategy
+   // reads, so two or three strategies often latch onto the exact same
+   // sequence. Drawing them under a content-keyed name (direction + anchor +
+   // level) means identical sequences collapse onto one pair of lines instead
+   // of stacking 2-3 copies. The live pass wipes+rebuilds these every tick.
+   //
+   // HISTORICAL setups (shared=false): they MUST own their Sweep/BOS lines
+   // under the per-setup base, otherwise the live pass's "delete all SH_"
+   // would erase them right after ScanHistory drew them -- leaving a zone with
+   // no visible sweep/BOS anatomy. Each historical setup gets its own pair.
+   //
+   // Either way each line stops at the candle that actually did the poking/
+   // closing, instead of running all the way to "now".
    string dir = s.bullish ? "B" : "S";
    if(s.sweepTime > 0)
      {
-      string skey = OBJ_PREFIX + "SH_SWEEP_" + dir + "_" + IntegerToString((int)s.sweepTime);
+      string skey = shared ? OBJ_PREFIX + "SH_SWEEP_" + dir + "_" + IntegerToString((int)s.sweepTime)
+                           : base + "Sweep";
       datetime sEnd = (s.sweepEndTime > s.sweepTime) ? s.sweepEndTime : tRight;
       if(ObjectFind(0, skey) < 0)
          DrawHLine(skey, s.sweepTime, sEnd, s.sweepLevel, InpColorSweep, STYLE_DASH, "Sweep");
      }
    if(s.bosTime > 0)
      {
-      string bkey = OBJ_PREFIX + "SH_BOS_" + dir + "_" + IntegerToString((int)s.bosTime);
+      string bkey = shared ? OBJ_PREFIX + "SH_BOS_" + dir + "_" + IntegerToString((int)s.bosTime)
+                           : base + "BOS";
       datetime bEnd = (s.bosEndTime > s.bosTime) ? s.bosEndTime : tRight;
       if(ObjectFind(0, bkey) < 0)
          DrawHLine(bkey, s.bosTime, bEnd, s.bosLevel, InpColorBOS, STYLE_DASH, "BOS");
@@ -1432,8 +1439,9 @@ void DrawHistoricalSetup(const IctSetup &s, int seq)
    ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 8);
 
    // Full anatomy for historical setups too -- Sweep / BOS / Entry / SL / TP --
-   // so a past setup shows the whole trade, not just the box.
-   DrawSetupLines(base, s, tRight);
+   // so a past setup shows the whole trade, not just the box. shared=false so
+   // each one owns its Sweep/BOS lines and the live pass can't wipe them.
+   DrawSetupLines(base, s, tRight, false);
   }
 
 //+------------------------------------------------------------------+
