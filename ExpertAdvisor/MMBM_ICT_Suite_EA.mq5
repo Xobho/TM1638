@@ -432,8 +432,9 @@ void ScanAllStrategies()
 
    // Market structure: redraw the swing pivots (HH/HL/LH/LL) this bar. These
    // are the SAME pivots the BOS breaks, so the chart shows exactly what the
-   // confirmation is reading.
-   DrawMarketStructure(rates, total);
+   // confirmation is reading. It fetches its own (history-sized) window so the
+   // labels reach the historical setups, not just the live scan range.
+   DrawMarketStructure();
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
      {
@@ -670,7 +671,7 @@ void DrawStructLabel(string name, datetime t, double price, string text, color c
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
   }
 
-void DrawMarketStructure(const MqlRates &r[], int total)
+void DrawMarketStructure()
   {
    if(!DrawingsAllowed())
       return;
@@ -678,9 +679,23 @@ void DrawMarketStructure(const MqlRates &r[], int total)
    if(!InpShowStructure)
       return;
 
-   int k       = StructureSwingBars();
-   int newest  = k;                              // can't confirm a pivot inside k bars of the edge
-   int oldest  = MathMin(total - k - 1, HoursToBars(InpLookbackHours));
+   int k = StructureSwingBars();
+
+   // Cover the WHOLE drawn region -- the live scan window AND the history
+   // window -- so the HH/HL/LH/LL labels reach the historical setups too,
+   // not just the most recent days.
+   int barsWanted = HoursToBars(InpLookbackHours);
+   if(InpHistoryDays > 0)
+      barsWanted = MathMax(barsWanted, HoursToBars(InpHistoryDays * 24.0));
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int total = CopyRates(_Symbol, InpLTF_Timeframe, 1, barsWanted, r);
+   if(total < 2 * k + 5)
+      return;
+
+   int newest = k;                               // can't confirm a pivot inside k bars of the edge
+   int oldest = total - k - 1;
    if(oldest <= newest)
       return;
 
