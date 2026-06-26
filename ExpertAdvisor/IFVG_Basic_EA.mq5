@@ -97,11 +97,12 @@ int      g_lastBull   = 0;     // counts for the dashboard
 int      g_lastBear   = 0;
 
 // backtest tally (filled by RunBacktest, shown on the dashboard)
-int      g_btWins   = 0;
-int      g_btLosses = 0;
-int      g_btOpen   = 0;
-int      g_btNoFill = 0;
-double   g_btTotalR = 0.0;
+int      g_btWins     = 0;
+int      g_btLosses   = 0;
+int      g_btOpen     = 0;
+int      g_btNoFill   = 0;
+double   g_btTotalR   = 0.0;
+double   g_btGrossWin = 0.0;   // sum of +R on winners (for profit factor)
 
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
@@ -679,75 +680,141 @@ void DrawLiquidity(const MqlRates &r[], int total)
 //+------------------------------------------------------------------+
 //| Dashboard                                                         |
 //+------------------------------------------------------------------+
+void MkLbl(string suffix, int x, int y, color c, int fs)
+  {
+   string nm = DPFX + suffix;
+   if(ObjectFind(0, nm) >= 0) return;
+   ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, fs);
+   ObjectSetString (0, nm, OBJPROP_FONT, "Consolas");
+   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
+  }
+void MkRect(string suffix, int x, int y, int w, int h, color bg, color border)
+  {
+   string nm = DPFX + suffix;
+   if(ObjectFind(0, nm) >= 0) return;
+   ObjectCreate(0, nm, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, nm, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, nm, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, nm, OBJPROP_BGCOLOR, bg);
+   ObjectSetInteger(0, nm, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, border);
+   ObjectSetInteger(0, nm, OBJPROP_BACK, false);
+   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
+  }
+void SetVal(string suffix, string txt, color c)
+  {
+   string nm = DPFX + suffix + "_v";
+   ObjectSetString (0, nm, OBJPROP_TEXT, txt);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, c);
+  }
+void MyAccountStats(int &pos, int &pend, double &fpl)
+  {
+   pos = 0; pend = 0; fpl = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol && (long)PositionGetInteger(POSITION_MAGIC) == InpMagic)
+        { pos++; fpl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP); }
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(OrderGetTicket(i) == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) == _Symbol && (long)OrderGetInteger(ORDER_MAGIC) == InpMagic) pend++;
+     }
+  }
+string ShortTF(ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf), 7); }
+
 void Dashboard()
   {
    if(!InpShowDashboard) { ObjectsDeleteAll(0, DPFX); return; }
 
-   string rows[] = {"Title", "Bias", "Conf", "Setups", "BTest", "Note"};
-   int x = 12, y = 18, rowH = 16;
+   int x = 8, yTop = 16, panelW = 312, headerH = 22, rowH = 16;
+   int keyX = x + 8, valX = x + 124, contentY = yTop + headerH + 5;
+
+   string sfx[]   = {"Sym","Bias","Mkt","Filt","Set","SecBT","WL","WR","Net","OpenT","SecAcc","Eq","Pos","PL","Auto"};
+   string left[]  = {"Symbol","HTF bias","Spread/ATR","Filters","Setups","--- BACKTEST ---",
+                     "Win / Loss","Win rate","Net / PF","Open / no-fill","--- ACCOUNT ---",
+                     "Equity / Bal","Pos / Pend","Float P/L","Auto-trade"};
+   bool   isSec[] = {false,false,false,false,false,true,false,false,false,false,true,false,false,false,false};
+   int    nrows   = ArraySize(sfx);
+
    if(ObjectFind(0, DPFX + "BG") < 0)
      {
-      ObjectCreate(0, DPFX + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_XDISTANCE, x - 6);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_YDISTANCE, y - 6);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_XSIZE, 300);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_YSIZE, ArraySize(rows) * rowH + 12);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_BGCOLOR, C'20,20,20');
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_COLOR, clrSilver);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_BACK, false);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, DPFX + "BG", OBJPROP_HIDDEN, true);
-      for(int i = 0; i < ArraySize(rows); i++)
+      MkRect("BG", x, yTop, panelW, headerH + nrows * rowH + 8, C'24,26,32', C'70,80,95');
+      MkRect("HB", x, yTop, panelW, headerH,                    C'33,82,120', C'33,82,120');
+      MkLbl ("Hdr", keyX, yTop + 4, clrWhite, 10);
+      ObjectSetString(0, DPFX + "Hdr", OBJPROP_TEXT, "INVERSION FVG");
+      for(int i = 0; i < nrows; i++)
         {
-         string nm = DPFX + rows[i];
-         ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
-         ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-         ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, x);
-         ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, y + i * rowH);
-         ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, 9);
-         ObjectSetString (0, nm, OBJPROP_FONT, "Consolas");
-         ObjectSetInteger(0, nm, OBJPROP_COLOR, clrWhite);
-         ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
-         ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
+         int ry = contentY + i * rowH;
+         if(isSec[i])
+           {
+            MkLbl(sfx[i], keyX, ry, C'120,140,165', 8);
+            ObjectSetString(0, DPFX + sfx[i], OBJPROP_TEXT, left[i]);
+           }
+         else
+           {
+            MkLbl(sfx[i] + "_k", keyX, ry, C'150,162,178', 9);
+            ObjectSetString(0, DPFX + sfx[i] + "_k", OBJPROP_TEXT, left[i]);
+            MkLbl(sfx[i] + "_v", valX, ry, clrWhite, 9);
+           }
         }
      }
 
-   string bias = !InpUseHTFBias ? "off"
-                 : (g_htfUp && !g_htfDown ? "BULL" : (g_htfDown && !g_htfUp ? "BEAR" : "neutral"));
-   string conf = "Sweep " + (InpUseLiquiditySweep ? "ON" : "off") +
-                 " | MSS " + (InpUseMSS ? "ON" : "off") +
-                 " | HTF " + (InpUseHTFBias ? "ON" : "off");
+   // ---- live values ----
+   string biasTxt = !InpUseHTFBias ? "off" : (g_htfUp && !g_htfDown ? "BULL" : (g_htfDown && !g_htfUp ? "BEAR" : "neutral"));
+   color  biasCol = (biasTxt == "BULL") ? clrLime : (biasTxt == "BEAR") ? clrTomato : clrSilver;
+   double atr = GetATR();
+   long   spr = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
-   ObjectSetString(0, DPFX + "Title",  OBJPROP_TEXT, "=== Inversion FVG (visual) ===");
-   ObjectSetInteger(0, DPFX + "Title", OBJPROP_COLOR, clrGold);
-   ObjectSetString(0, DPFX + "Bias",   OBJPROP_TEXT, "HTF " + EnumToString(InpHTF) + " bias: " + bias);
-   ObjectSetString(0, DPFX + "Conf",   OBJPROP_TEXT, conf);
-   ObjectSetString(0, DPFX + "Setups", OBJPROP_TEXT, "Drawn: " + IntegerToString(g_lastBull) + " bull, " + IntegerToString(g_lastBear) + " bear");
+   SetVal("Sym",  _Symbol + "  " + ShortTF((ENUM_TIMEFRAMES)_Period), clrWhite);
+   SetVal("Bias", biasTxt + " (" + ShortTF(InpHTF) + ")", biasCol);
+   SetVal("Mkt",  IntegerToString((int)spr) + " pts   ATR " + DoubleToString(atr, _Digits), clrSilver);
+   string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (InpUseMSS ? "MSS " : "") + (InpUseHTFBias ? "HTF" : "");
+   if(fl == "") fl = "none";
+   SetVal("Filt", fl, clrAqua);
+   SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
 
    if(InpShowBacktest)
      {
       int    tot = g_btWins + g_btLosses;
       double wr  = (tot > 0) ? 100.0 * g_btWins / tot : 0.0;
-      ObjectSetString(0, DPFX + "BTest", OBJPROP_TEXT,
-         StringFormat("BT %dd: %dW/%dL (%.0f%%)  %+.1fR  %d open", InpBacktestDays, g_btWins, g_btLosses, wr, g_btTotalR, g_btOpen));
-      ObjectSetInteger(0, DPFX + "BTest", OBJPROP_COLOR, (g_btTotalR >= 0 ? clrLimeGreen : clrRed));
+      double pf  = (g_btLosses > 0) ? g_btGrossWin / (double)g_btLosses : (g_btGrossWin > 0 ? 999.0 : 0.0);
+      SetVal("WL",    IntegerToString(g_btWins) + "W / " + IntegerToString(g_btLosses) + "L", clrWhite);
+      SetVal("WR",    DoubleToString(wr, 0) + "%   (" + IntegerToString(tot) + " trades)", wr >= 50 ? clrLime : clrGold);
+      SetVal("Net",   StringFormat("%+.1fR   PF %s", g_btTotalR, (pf >= 999 ? "inf" : DoubleToString(pf, 2))), g_btTotalR >= 0 ? clrLime : clrTomato);
+      SetVal("OpenT", IntegerToString(g_btOpen) + " open / " + IntegerToString(g_btNoFill) + " no-fill", clrSilver);
      }
    else
-      ObjectSetString(0, DPFX + "BTest", OBJPROP_TEXT, "Backtest: off");
+     {
+      SetVal("WL", "off", clrSilver); SetVal("WR", "-", clrSilver);
+      SetVal("Net", "-", clrSilver);  SetVal("OpenT", "-", clrSilver);
+     }
 
-   string mode;
-   if(!InpAutoTrade)
-      mode = "scan only (no orders)";
+   int pos, pend; double fpl; MyAccountStats(pos, pend, fpl);
+   SetVal("Eq",  DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + " / " + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2), clrWhite);
+   SetVal("Pos", IntegerToString(pos) + " pos / " + IntegerToString(pend) + " pend", clrWhite);
+   SetVal("PL",  DoubleToString(fpl, 2), fpl >= 0 ? clrLime : clrTomato);
+
+   string autoTxt; color autoCol;
+   if(!InpAutoTrade) { autoTxt = "OFF (scan only)"; autoCol = clrSilver; }
    else
      {
       string br = TradeBlockReason();
-      mode = (br == "") ? ("AUTO-TRADE lot " + DoubleToString(InpLotSize, 2))
-                        : ("AUTO-TRADE blocked: " + br);
+      if(br == "") { autoTxt = "ON  lot " + DoubleToString(InpLotSize, 2); autoCol = clrLime; }
+      else         { autoTxt = "BLOCKED: " + br;                          autoCol = clrTomato; }
      }
-   ObjectSetString(0, DPFX + "Note",   OBJPROP_TEXT, "Chart " + EnumToString((ENUM_TIMEFRAMES)_Period) + "  (" + mode + ")");
-   ObjectSetInteger(0, DPFX + "Note",  OBJPROP_COLOR, InpAutoTrade ? clrOrange : clrSilver);
+   SetVal("Auto", autoTxt, autoCol);
   }
 
 //+------------------------------------------------------------------+
@@ -760,7 +827,7 @@ void Dashboard()
 //+------------------------------------------------------------------+
 void RunBacktest()
   {
-   g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0;
+   g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0; g_btGrossWin = 0.0;
    if(!InpShowBacktest)
       return;
 
@@ -797,7 +864,7 @@ void RunBacktest()
          if(hitTP) { oc =  1; break; }
         }
 
-      if(oc == 1)      { g_btWins++;   g_btTotalR += sx[i].rr; }
+      if(oc == 1)      { g_btWins++;   g_btTotalR += sx[i].rr; g_btGrossWin += sx[i].rr; }
       else if(oc == -1){ g_btLosses++; g_btTotalR -= 1.0; }
       else               g_btOpen++;
      }
@@ -814,12 +881,13 @@ void RunBacktest()
 // "" = clear to trade; otherwise the exact reason MT5 is blocking us.
 string TradeBlockReason()
   {
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED))                                                          return "no connection";
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                                                                return "Algo Trading button OFF";
-   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))                                                  return "account trading off";
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))                  return "no connection";
+   if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))        return "Algo button OFF (toolbar)";
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                        return "EA 'Allow Algo Trading' off";
+   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))          return "account trading off";
    ENUM_SYMBOL_TRADE_MODE tm = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
-   if(tm == SYMBOL_TRADE_MODE_DISABLED)                                                                  return "symbol trading disabled";
-   if(tm == SYMBOL_TRADE_MODE_CLOSEONLY)                                                                 return "symbol close-only (market closed?)";
+   if(tm == SYMBOL_TRADE_MODE_DISABLED)                          return "symbol disabled";
+   if(tm == SYMBOL_TRADE_MODE_CLOSEONLY)                         return "symbol close-only (mkt closed?)";
    return "";
   }
 
