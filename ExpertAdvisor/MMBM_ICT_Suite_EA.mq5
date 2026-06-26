@@ -35,16 +35,20 @@
 //|  price retests for the entry:                                     |
 //|   1. FVG  (Sweep -> BOS -> FVG): entry in the fair value gap left |
 //|      inside the BOS impulse leg, in the new bias direction.       |
-//|   2. IFVG (Sweep -> BOS -> Inversion FVG): an opposing FVG that   |
-//|      the BOS move CLOSED THROUGH (inverted); entry on the retest  |
-//|      of that flipped zone.                                        |
+//|   2. IFVG (Sweep -> IFVG, gap-break): the 3-candle gap on the     |
+//|      displacement leg into the swept extreme; once price CLOSES   |
+//|      clean through that gap (the inversion) it flips polarity --  |
+//|      that close-through replaces BOS as the confirmation. Entry   |
+//|      on the retest of the flipped zone. Dropped if price later    |
+//|      closes back through the far side (inversion failed).        |
 //|   3. BRK  (Sweep -> BOS -> Breaker Block): the opposing order     |
 //|      block that the BOS move VIOLATED (closed through) and        |
 //|      flipped; entry on the retest of that breaker.                |
 //|                                                                  |
-//|  The Sweep -> BOS sequence is MANDATORY for all three: a zone     |
-//|  with no sweep+BOS in front of it is never reported. Each setup   |
-//|  is "forming" until price retraces into the zone, then "ready".   |
+//|  A confirmed liquidity sweep is MANDATORY for all three. FVG and  |
+//|  BRK additionally require a BOS; IFVG instead requires the gap to  |
+//|  be closed through. Each setup is "forming" until price retraces  |
+//|  into the zone, then "ready".                                     |
 //|                                                                  |
 //|  Stop loss sits beyond the structure (sweep extreme / zone edge /|
 //|  swing); take profit is the next external liquidity (draw on     |
@@ -181,6 +185,19 @@ struct SeqSweepBOS
    datetime bosBreakTime;   // the candle that actually closed through structure (line end)
   };
 
+//--- one confirmed liquidity sweep (no BOS required) -------------------
+// The IFVG strategy runs on this instead of SeqSweepBOS: a sweep alone is
+// enough, and the gap-break (price closing through the inverted gap) is what
+// replaces BOS as the structural confirmation.
+struct SweepEvent
+  {
+   int      sweepIdx;       // bar that poked through the pool (newest extreme)
+   double   sweepExtreme;   // the wick price -- the stop sits beyond THIS
+   double   sweepLevel;     // the raided liquidity level (pool)
+   datetime sweepTime;      // the swing bar that was raided (anchor for the Sweep line)
+   datetime sweepBreakTime; // the candle that actually poked through (line end)
+  };
+
 //--- globals -----------------------------------------------------------
 CTrade        g_trade;
 CSymbolInfo   g_symbol;
@@ -222,7 +239,7 @@ string FullName(int n)
    switch(n)
      {
       case 0: return "Sweep+BOS+FVG";
-      case 1: return "Sweep+BOS+Inversion FVG";
+      case 1: return "Sweep+IFVG (gap-break)";
       case 2: return "Sweep+BOS+Breaker Block";
      }
    return "?";
@@ -507,6 +524,9 @@ bool SetupAcceptable(const IctSetup &s)
 //+------------------------------------------------------------------+
 bool RunDetector(int n, bool bull, const MqlRates &r[], int total, IctSetup &o)
   {
+   if(n == 1)                       // IFVG: sweep -> gap-break, no BOS gate
+      return RunDetector_IFVG(bull, r, total, o);
+
    SeqSweepBOS seqs[];
    int ns = CollectSweepBOS(r, total, bull, seqs);
    if(ns == 0)
@@ -819,6 +839,56 @@ int CollectSweepBOS(const MqlRates &r[], int total, bool bullish, SeqSweepBOS &o
   }
 
 //+------------------------------------------------------------------+
+//| Enumerate CONFIRMED sweeps only (no BOS). A sweep = a proper swing |
+//| pool poked through (wick beyond) and CLOSED back inside -- the same |
+//| rejection the BOS gate uses, just without the structure-break step. |
+//| Sorted freshest-first. This feeds the IFVG gap-break detector.      |
+//+------------------------------------------------------------------+
+int CollectSweeps(const MqlRates &r[], int total, bool bullish, SweepEvent &out[])
+  {
+   ArrayResize(out, 0);
+   int k        = InpLiquiditySwingBars;
+   int maxFresh = HoursToBars(InpSweepFreshnessHours);
+   int cap      = 40;
+
+   for(int i = k + 1; i < total - k; i++)
+     {
+      bool isPool = bullish ? IsSwingLow(r, i, k) : IsSwingHigh(r, i, k);
+      if(!isPool)
+         continue;
+      double level = bullish ? r[i].low : r[i].high;
+
+      int sIdx = -1; double sPrice = 0.0;
+      for(int j = i - k - 1; j >= 0; j--)
+        {
+         if(bullish  && r[j].low  < level && r[j].close > level) { sIdx = j; sPrice = r[j].low;  break; }
+         if(!bullish && r[j].high > level && r[j].close < level) { sIdx = j; sPrice = r[j].high; break; }
+        }
+      if(sIdx < 0)        continue;   // pool never swept
+      if(sIdx > maxFresh) continue;   // sweep too stale to be live
+
+      int sz = ArraySize(out);
+      ArrayResize(out, sz + 1);
+      out[sz].sweepIdx       = sIdx;
+      out[sz].sweepExtreme   = sPrice;
+      out[sz].sweepLevel     = level;
+      out[sz].sweepTime      = r[i].time;
+      out[sz].sweepBreakTime = r[sIdx].time;
+      if(ArraySize(out) >= cap)
+         break;
+     }
+
+   int n = ArraySize(out);
+   for(int a = 0; a < n - 1; a++)
+      for(int b = 0; b < n - 1 - a; b++)
+         if(out[b].sweepIdx > out[b + 1].sweepIdx)
+           {
+            SweepEvent tmp = out[b]; out[b] = out[b + 1]; out[b + 1] = tmp;
+           }
+   return n;
+  }
+
+//+------------------------------------------------------------------+
 //| Diagnostic for the shared gate: how many sweep->BOS sequences     |
 //| exist (or, if none, which stage failed), so the dashboard can      |
 //| show WHY the strategies are blank instead of just "-".            |
@@ -976,6 +1046,128 @@ bool BuildSetup_IFVG(const MqlRates &r[], int total, bool bullish, const SeqSwee
    ComputeZoneTrade(r, total, bullish, zHi, zLo, q.sweepExtreme, entry, sl, tp);
    SetTrade(o, entry, sl, tp);
    return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Strategy 2 (ACTIVE): Sweep -> IFVG, gap-break replaces BOS.       |
+//| After a confirmed sweep, find the 3-candle gap on the displacement|
+//| leg that ran into the swept extreme. The setup only counts once   |
+//| price CLOSES clean through that gap (the inversion / "break") --   |
+//| that close-through is the structural confirmation, in place of a   |
+//| separate BOS pivot. Entry is the retest of the inverted gap. If    |
+//| price later closes back through the FAR side, the inversion failed |
+//| and the setup is dropped. (BuildSetup_IFVG_GapBreak)              |
+//+------------------------------------------------------------------+
+bool BuildSetup_IFVG_GapBreak(const MqlRates &r[], int total, bool bullish, const SweepEvent &sw, IctSetup &o)
+  {
+   double minSize  = InpMinFVGSizeATR * GetATR();
+   int    lookback = HoursToBars(InpMaxFVGSearchHours);
+   int    oldest   = MathMin(sw.sweepIdx + lookback, total - 2);
+
+   // Walk the displacement leg from the swept extreme back, taking the FIRST
+   // gap that has actually been closed through (the inversion) and not undone.
+   for(int m = sw.sweepIdx; m <= oldest; m++)
+     {
+      if(m - 1 < 0 || m + 1 >= total)
+         continue;
+
+      double gTop, gBot;
+      if(bullish)
+        {
+         // low sweep -> the inverting gap is a DOWN gap on the leg into the
+         // swept low: older low > newer high.
+         gTop = r[m + 1].low;    // older low  = top of the down-gap
+         gBot = r[m - 1].high;   // newer high = bottom of the down-gap
+        }
+      else
+        {
+         // high sweep -> the inverting gap is an UP gap on the leg into the
+         // swept high: newer low > older high.
+         gBot = r[m + 1].high;   // older high = bottom of the up-gap
+         gTop = r[m - 1].low;    // newer low  = top of the up-gap
+        }
+      if(gTop - gBot < minSize)
+         continue;
+
+      // BREAK = displacement CLOSES clean through the gap (this replaces BOS).
+      // Only candles AFTER the sweep count, so the break is the reversal that
+      // inverts the gap, not a candle from the move that built it.
+      int brk = -1;
+      int from = MathMin(m - 1, sw.sweepIdx - 1);
+      for(int j = from; j >= 0; j--)
+        {
+         if(!bullish && r[j].close < gBot) { brk = j; break; }   // closed below -> resistance
+         if( bullish && r[j].close > gTop) { brk = j; break; }   // closed above -> support
+        }
+      if(brk < 0)
+         continue;            // no inversion yet -> just an ordinary FVG, not an IFVG
+
+      // INVALIDATION: if after the break price CLOSED back through the FAR side
+      // (reclaimed the whole gap the other way), the inversion failed -- skip it.
+      bool failed = false;
+      for(int j = brk - 1; j >= 0; j--)
+        {
+         if(!bullish && r[j].close > gTop) { failed = true; break; }
+         if( bullish && r[j].close < gBot) { failed = true; break; }
+        }
+      if(failed)
+         continue;
+
+      FillSetupCommon(o, 1, bullish);
+      o.sweepLevel = sw.sweepLevel; o.sweepTime = sw.sweepTime; o.sweepEndTime = sw.sweepBreakTime;
+      // The "BOS" anatomy line is repurposed to show the inversion break: the
+      // gap edge that price closed through, ending at the candle that did it.
+      o.bosLevel   = bullish ? gTop : gBot;
+      o.bosTime    = r[m].time;        // the gap (displacement) anchor
+      o.bosEndTime = r[brk].time;      // the candle that closed through the gap
+      o.isZone = true; o.zoneHigh = gTop; o.zoneLow = gBot; o.zoneTime = r[m + 1].time;
+      o.stage  = StageFromZone(r, gBot, gTop);
+      o.tested = ZoneTested(r, brk, gBot, gTop);   // "tested" = a retest AFTER the break
+
+      double entry, sl, tp;
+      ComputeZoneTrade(r, total, bullish, gTop, gBot, sw.sweepExtreme, entry, sl, tp);
+      SetTrade(o, entry, sl, tp);
+      return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| IFVG detector: run the gap-break builder over EVERY fresh sweep   |
+//| and return the freshest one that passes the hard filters (PD/RR), |
+//| else the first structurally-valid one so the dashboard can show   |
+//| why it was filtered -- mirrors RunDetector's fallback contract.   |
+//+------------------------------------------------------------------+
+bool RunDetector_IFVG(bool bull, const MqlRates &r[], int total, IctSetup &o)
+  {
+   SweepEvent sw[];
+   int ns = CollectSweeps(r, total, bull, sw);
+   if(ns == 0)
+      return false;
+
+   IctSetup fallback; bool haveFallback = false;
+   for(int s = 0; s < ns; s++)
+     {
+      IctSetup cand; ZeroMemory(cand);
+      if(!BuildSetup_IFVG_GapBreak(r, total, bull, sw[s], cand))
+         continue;
+      if(SetupAcceptable(cand))
+        {
+         o = cand;
+         return true;
+        }
+      if(!haveFallback)
+        {
+         fallback = cand;
+         haveFallback = true;
+        }
+     }
+   if(haveFallback)
+     {
+      o = fallback;
+      return true;
+     }
+   return false;
   }
 
 //+------------------------------------------------------------------+
