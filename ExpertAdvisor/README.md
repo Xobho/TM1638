@@ -240,9 +240,20 @@ highs/lows on your chart.
 | `BRK` | Sweep → BOS → Breaker Block | The *opposing* order block that the BOS move violated (closed through) and flipped; retest of that breaker |
 
 Each strategy can be toggled independently (`InpEnableFVG`, `InpEnableIFVG`,
-`InpEnableBreaker`). All detection runs on `InpLTF_Timeframe`; HTF bias
+`InpEnableBreaker`). All detection runs on `InpLTF_Timeframe`, which defaults
+to `PERIOD_CURRENT` — i.e. whatever chart you attach the EA to — so the suite
+adapts to any timeframe out of the box without you having to set it manually
+or match the chart to it. Set it explicitly only if you want detection to run
+on a different timeframe than the chart you're viewing. HTF bias
 (`InpHTF_Timeframe`) gates which directions are shown exactly as in the
 single-strategy EA.
+
+All size/buffer thresholds (`InpMinFVGSizeATR`, `InpSweepBufferATR`) are
+expressed as a multiple of ATR (`InpATRPeriod`, computed on `InpLTF_Timeframe`)
+rather than a fixed point distance, so they also scale automatically — a
+30-point minimum gap that makes sense on M15 gold would be either noise on H4
+or impossibly strict on M1; ATR-relative sizing keeps the same *relative*
+strictness on every timeframe and symbol.
 
 Toggling a strategy (or any input) takes effect immediately — `OnInit` runs
 a full live rescan as soon as you click OK, rather than waiting for the next
@@ -266,7 +277,10 @@ Every setup carries two key attributes shown in its label and the dashboard:
 ## Chart visuals
 
 Drawings only render when the chart period matches `InpLTF_Timeframe` (same
-reason as the other EA — the objects are LTF-bar-sized). Each (strategy,
+reason as the other EA — the objects are LTF-bar-sized). Since `InpLTF_Timeframe`
+defaults to `PERIOD_CURRENT`, this matches automatically; the warning only
+shows if you've explicitly pinned `InpLTF_Timeframe` to a timeframe different
+from the chart. Each (strategy,
 direction) slot is redrawn each bar and named
 `ICTS_<CODE>_<B|S>_...`, so at most 6 setups show at once, replaced in place.
 Every setup draws its **full anatomy**, not just the box, so you can read the
@@ -335,7 +349,7 @@ setups worth taking.
 
 - **`TRIGGER_TOUCH`** (default) — checked **every tick**. The instant live
   price (including just a wick) reaches into the zone band
-  (`zoneLow .. zoneHigh` ± `InpSweepBufferPoints`), the trade fires — **the
+  (`zoneLow .. zoneHigh` ± `InpSweepBufferATR` × ATR), the trade fires — **the
   entry is the first touch / wick into the zone on the retest; it does NOT
   wait for the candle to close.** Catches fast touches that reverse before the
   candle closes. The setups themselves are still *detected* only on closed bars
@@ -365,15 +379,18 @@ and adjust. Backtest before risking real funds.
 The trigger decides *when* to enter; these gates decide *whether a setup is
 eligible at all*. They sit on top of every strategy and stop the EA taking a
 pattern with no surrounding ICT context (e.g. a stop-hunt entry in the wrong
-half of the range, or in a dead session). Both are on by default:
+half of the range, or in a dead session).
 
-- **Premium / Discount** (`InpUsePremiumDiscount`): a dealing range is built
-  from the high/low of the last `InpPDRangeHours` hours (default 12.5); its 50%
-  is equilibrium. **Buys are only allowed at/below equilibrium (discount),
-  sells at/above (premium)** — the core ICT rule that you buy cheap and sell
-  expensive within the range. This is a **hard filter applied at detection**:
-  a setup in the wrong half is rejected outright — neither drawn nor traded.
-- **Killzones** (`InpUseKillzones`): trades fire only inside two configurable
+- **Premium / Discount** (`InpUsePremiumDiscount`, **off by default**): a
+  dealing range is built from the high/low of the last `InpPDRangeHours` hours
+  (default 12.5); its 50% is equilibrium. **Buys are only allowed at/below
+  equilibrium (discount), sells at/above (premium)** — the core ICT rule that
+  you buy cheap and sell expensive within the range. This is a **hard filter
+  applied at detection**: a setup in the wrong half is rejected outright —
+  neither drawn nor traded. It defaults to off so you can see every detected
+  setup drawn first and confirm the strategies behave as expected before
+  layering this filter back on.
+- **Killzones** (`InpUseKillzones`, on by default): trades fire only inside two configurable
   session windows — `InpKZ1StartHour..InpKZ1EndHour` (London) and
   `InpKZ2StartHour..InpKZ2EndHour` (New York). **Hours are broker/SERVER
   time**, not your local or EST time, so set them to match your broker (the

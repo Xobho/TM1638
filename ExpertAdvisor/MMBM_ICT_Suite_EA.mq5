@@ -73,7 +73,7 @@ enum ENUM_ENTRY_MODE
 
 //--- inputs -----------------------------------------------------------
 input ENUM_TIMEFRAMES InpHTF_Timeframe        = PERIOD_H4;   // Higher timeframe used for directional bias
-input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_M15;  // Entry timeframe (all detection runs here)
+input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_CURRENT; // Entry timeframe (PERIOD_CURRENT = whatever chart this is attached to)
 input int             InpSwingLeftRight       = 3;           // Bars each side to confirm a general structure swing
 input int             InpLiquiditySwingBars   = 5;           // Bars each side to confirm a PROPER swing for the sweep / BOS / TP liquidity (>= InpSwingLeftRight = stronger, more significant pivots)
 input bool            InpRequireHTFBias       = true;        // Only show/trade setups aligned with HTF structure
@@ -81,9 +81,10 @@ input double          InpHTFLookbackHours     = 1200.0;      // How far back (ho
 input double          InpLookbackHours        = 72.0;        // How far back (hours) the live scan searches for liquidity pools/structure -- a pool can take days to build, so this is time-based, not a fixed bar count
 input double          InpSweepFreshnessHours  = 6.0;         // Max age (hours) a sweep/break may be and still count as a live, tradable setup
 input double          InpMaxFVGSearchHours    = 3.75;        // How far back (hours) from the MSS bar to search the entry FVG
-input double          InpMinFVGSizePoints     = 30;          // Minimum FVG size (points) to be tradable
+input int             InpATRPeriod            = 14;          // ATR period (on the entry timeframe) used to scale size/buffer thresholds across timeframes
+input double          InpMinFVGSizeATR        = 0.15;        // Minimum FVG size, as a multiple of ATR, to be tradable
 input ENUM_ENTRY_MODE InpEntryMode            = ENTRY_FIRST_TOUCH; // Entry price inside the zone: first-touch (wick) / midpoint / far edge
-input double          InpSweepBufferPoints    = 20;          // Stop buffer + zone tolerance (points) for all strategies
+input double          InpSweepBufferATR       = 0.10;        // Stop buffer + zone tolerance, as a multiple of ATR, for all strategies
 input double          InpFallbackRR           = 2.0;         // Reward:Risk used when no liquidity target is found
 input double          InpMinRR                = 2.0;         // Minimum reward:risk (2.0 = 1:2). Setups below this are skipped (not drawn or traded)
 
@@ -101,7 +102,7 @@ input bool   InpSkipTestedSetups  = true;    // Don't enter a zone that has alre
 input ulong  InpMagicNumber       = 19380002; // Magic number for this EA's orders
 
 input group "=== Context filters (ICT) ==="
-input bool   InpUsePremiumDiscount = true;  // Only BUY in discount / SELL in premium of the dealing range
+input bool   InpUsePremiumDiscount = false; // Only BUY in discount / SELL in premium of the dealing range (off by default so you can see every setup drawn first)
 input double InpPDRangeHours       = 12.5;  // Hours defining the dealing range (high..low) for premium/discount
 input bool   InpUseKillzones       = true;  // Only trade inside the session windows below (broker/SERVER time)
 input int    InpKZ1StartHour       = 8;     // Killzone 1 (London) start hour, server time 0-23
@@ -182,6 +183,7 @@ CSymbolInfo   g_symbol;
 datetime      g_lastLTFBarTime = 0;
 bool          g_htfBullBias = true;
 bool          g_htfBearBias = true;
+int           g_atrHandle = INVALID_HANDLE;   // ATR on the entry timeframe, so size/buffer thresholds scale with whatever TF this is attached to
 
 IctSetup      g_slots[NUM_SLOTS];   // current detections, indexed by SlotIndex()
 bool          g_slotActive[NUM_SLOTS];
@@ -235,6 +237,10 @@ int OnInit()
    if(!g_symbol.Name(_Symbol))
       return INIT_FAILED;
 
+   g_atrHandle = iATR(_Symbol, InpLTF_Timeframe, InpATRPeriod);
+   if(g_atrHandle == INVALID_HANDLE)
+      return INIT_FAILED;
+
    for(int i = 0; i < NUM_SLOTS; i++)
      {
       ZeroMemory(g_slots[i]);
@@ -261,8 +267,36 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   if(g_atrHandle != INVALID_HANDLE)
+      IndicatorRelease(g_atrHandle);
    DeleteObjectsByPrefix(OBJ_PREFIX);
    Comment("");
+  }
+
+//+------------------------------------------------------------------+
+//| InpLTF_Timeframe defaults to PERIOD_CURRENT, meaning "whatever    |
+//| chart this is attached to" -- this resolves that to a concrete    |
+//| ENUM_TIMEFRAMES so comparisons (mismatch check, dashboard label)   |
+//| work. CopyRates/iTime/PeriodSeconds already resolve PERIOD_CURRENT |
+//| themselves, so this is only needed where we compare against        |
+//| _Period directly.                                                  |
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES EffectiveLTF()
+  {
+   return (InpLTF_Timeframe == PERIOD_CURRENT) ? (ENUM_TIMEFRAMES)_Period : InpLTF_Timeframe;
+  }
+
+//+------------------------------------------------------------------+
+//| Current ATR on the entry timeframe, in price units. Used to scale |
+//| FVG-size and stop-buffer thresholds with the chart's timeframe     |
+//| instead of a fixed point distance that only made sense on one TF. |
+//+------------------------------------------------------------------+
+double GetATR()
+  {
+   double buf[];
+   if(CopyBuffer(g_atrHandle, 0, 1, 1, buf) < 1)
+      return 0.0;
+   return buf[0];
   }
 
 //+------------------------------------------------------------------+
@@ -270,7 +304,7 @@ void OnDeinit(const int reason)
 //| chart period matches the strategy timeframe (otherwise the tiny  |
 //| LTF objects get crammed together into clutter).                  |
 //+------------------------------------------------------------------+
-bool DrawingsAllowed() { return InpShowDrawings && (_Period == InpLTF_Timeframe); }
+bool DrawingsAllowed() { return InpShowDrawings && (_Period == EffectiveLTF()); }
 
 //+------------------------------------------------------------------+
 void OnTick()
@@ -309,11 +343,13 @@ void OnTick()
 //+------------------------------------------------------------------+
 void ScanAllStrategies()
   {
+   if(GetATR() <= 0.0)
+      return;   // ATR not warmed up yet (e.g. just attached) -- size/buffer thresholds would be zero, skip until it is
+
    GetHTFBias(g_htfBullBias, g_htfBearBias);
    ComputePremiumDiscount();
 
    int lookbackBars = HoursToBars(InpLookbackHours);
-   lookbackBars = (int)MathMin(lookbackBars, 5000);   // hard ceiling so a huge InpLookbackHours on a small TF can't stall a tick
 
    MqlRates rates[];
    ArraySetAsSeries(rates, true);              // index 0 = newest, like ict.py's reversed series
@@ -545,12 +581,12 @@ bool FindLiquidityTarget(const MqlRates &r[], int total, bool bullish, double en
 
 //+------------------------------------------------------------------+
 //| stage + tested helpers (mirror ict.py _stage_from_zone /          |
-//| _zone_tested). buffer = InpSweepBufferPoints for every strategy.  |
+//| _zone_tested). buffer = InpSweepBufferATR * ATR for every strategy.|
 //+------------------------------------------------------------------+
 string StageFromZone(const MqlRates &r[], double lo, double hi)
   {
    double price = r[0].close;
-   double buf   = InpSweepBufferPoints * g_symbol.Point();
+   double buf   = InpSweepBufferATR * GetATR();
    return (lo - buf <= price && price <= hi + buf) ? "ready" : "forming";
   }
 
@@ -558,7 +594,7 @@ bool ZoneTested(const MqlRates &r[], int refIdx, double lo, double hi)
   {
    if(refIdx <= 0)
       return false;
-   double buf = InpSweepBufferPoints * g_symbol.Point();
+   double buf = InpSweepBufferATR * GetATR();
    double zlo = lo - buf, zhi = hi + buf;
    for(int idx = 0; idx < refIdx; idx++)
       if(r[idx].low <= zhi && r[idx].high >= zlo)
@@ -637,7 +673,7 @@ bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int 
 
 bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow, datetime &fvgTimeLeft, datetime &fvgTimeRight)
   {
-   double minSize = InpMinFVGSizePoints * g_symbol.Point();
+   double minSize = InpMinFVGSizeATR * GetATR();
    int searchFrom = MathMin(sweepIdx, mssIdx + HoursToBars(InpMaxFVGSearchHours));
    for(int i = mssIdx + 1; i < searchFrom; i++)
      {
@@ -754,7 +790,7 @@ void ComputeZoneTrade(const MqlRates &r[], int total, bool bullish,
                       double zoneHi, double zoneLo, double sweepExtreme,
                       double &entry, double &sl, double &tp)
   {
-   double pt = g_symbol.Point();
+   double atrBuf = InpSweepBufferATR * GetATR();
    // Proximal edge = the side price reaches FIRST on the retest: the top of
    // the zone for a bullish setup (price drops into it from above), the bottom
    // for a bearish setup (price rallies into it from below).
@@ -766,8 +802,8 @@ void ComputeZoneTrade(const MqlRates &r[], int total, bool bullish,
       case ENTRY_FAR_EDGE: entry = distal;                  break;
       default:             entry = proximal;                break;  // ENTRY_FIRST_TOUCH
      }
-   sl = bullish ? sweepExtreme - InpSweepBufferPoints * pt
-                : sweepExtreme + InpSweepBufferPoints * pt;
+   sl = bullish ? sweepExtreme - atrBuf
+                : sweepExtreme + atrBuf;
    double slDist = MathAbs(entry - sl);
    double tgt;
    if(FindLiquidityTarget(r, total, bullish, entry, tgt)) tp = tgt;
@@ -784,7 +820,7 @@ void ComputeZoneTrade(const MqlRates &r[], int total, bool bullish,
 bool FindInversionFVG(const MqlRates &r[], int total, bool bullish, int bosIdx, int sweepIdx,
                       double &zoneHi, double &zoneLo, datetime &tLeft, datetime &tRight, int &invIdx)
   {
-   double minSize = InpMinFVGSizePoints * g_symbol.Point();
+   double minSize = InpMinFVGSizeATR * GetATR();
    int hiLimit = MathMin(sweepIdx + HoursToBars(InpMaxFVGSearchHours), total - 2);
 
    for(int i = bosIdx + 1; i <= hiLimit; i++)
@@ -1027,7 +1063,7 @@ void TradeBestSetup(bool touchMode)
    if(!KillzoneOK())
       return;
 
-   double buf = InpSweepBufferPoints * g_symbol.Point();
+   double buf = InpSweepBufferATR * GetATR();
    double px  = g_symbol.Bid();
 
    int best = -1;
@@ -1215,6 +1251,9 @@ void DrawSetupLines(string base, const IctSetup &s, datetime tRight)
 //+------------------------------------------------------------------+
 void ScanHistory()
   {
+   if(GetATR() <= 0.0)
+      return;   // ATR not warmed up yet -- size/buffer thresholds would be zero
+
    DeleteObjectsByPrefix(OBJ_PREFIX + "HIST_");
 
    datetime fromTime = TimeCurrent() - (long)InpHistoryDays * 86400;
@@ -1427,7 +1466,7 @@ void UpdateDashboard()
   {
    EnsureDashboardObjects();
 
-   bool tfMatch = (_Period == InpLTF_Timeframe);
+   bool tfMatch = (_Period == EffectiveLTF());
    double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
 
