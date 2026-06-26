@@ -9,7 +9,8 @@
 //|   3. Decisive break  - a candle CLOSES its body fully on the      |
 //|                        opposite side of the FVG (wick poke != it).|
 //|                        The FVG is now INVERTED.                    |
-//|   4. Entry           - consequent encroachment = 50% of the gap   |
+//|   4. Entry           - proximal edge of the zone (top for buys,   |
+//|                        bottom for sells)                          |
 //|   5. Stop loss        - just beyond the inverted gap's extreme     |
 //|   6. Target           - next draw on liquidity (swing H/L), >=1:2  |
 //|                                                                  |
@@ -377,8 +378,11 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[])
          double price = r[0].close;
          s.stage = (price >= gapLow && price <= gapHigh) ? "ready" : "forming";
 
-         // Steps 4/5/6: entry at 50%, SL beyond the extreme, TP at next liquidity.
-         s.entry = (gapHigh + gapLow) / 2.0;
+         // Entry at the PROXIMAL edge -- the side price reaches FIRST on the
+         // retest: the BOTTOM of the zone for a sell (price rallies up into
+         // resistance), the TOP for a buy (price drops into support).
+         // SL beyond the far extreme; TP at the next liquidity.
+         s.entry = bearish ? gapLow : gapHigh;
          s.sl    = bearish ? gapHigh + buf : gapLow - buf;
          double tp;
          if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
