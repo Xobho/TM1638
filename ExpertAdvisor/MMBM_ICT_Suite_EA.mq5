@@ -159,8 +159,10 @@ struct IctSetup
    // anatomy of the setup, for drawing the full picture (sweep -> BOS -> zone)
    double   sweepLevel;   // the liquidity extreme that was swept (the stop sits beyond it)
    datetime sweepTime;    // bar that did the sweep
+   datetime sweepEndTime; // the actual candle that poked through (where the Sweep line should stop)
    double   bosLevel;     // the structure level the BOS broke
    datetime bosTime;      // bar that confirmed the BOS
+   datetime bosEndTime;   // the actual candle that closed through (where the BOS line should stop)
   };
 
 //--- one sweep->BOS sequence (the shared skeleton every strategy reads) -
@@ -175,6 +177,8 @@ struct SeqSweepBOS
    int      bosIdx;       // bar that CLOSED through structure (the break)
    double   bosLevel;     // the broken swing's level
    datetime bosTime;      // the broken swing bar (anchor for the BOS line)
+   datetime sweepBreakTime; // the candle that actually poked through the pool (line end)
+   datetime bosBreakTime;   // the candle that actually closed through structure (line end)
   };
 
 //--- globals -----------------------------------------------------------
@@ -187,6 +191,11 @@ int           g_atrHandle = INVALID_HANDLE;   // ATR on the entry timeframe, so 
 
 IctSetup      g_slots[NUM_SLOTS];   // current detections, indexed by SlotIndex()
 bool          g_slotActive[NUM_SLOTS];
+
+// Runtime on/off state for each strategy, seeded from the InpEnable* inputs
+// at OnInit but then flippable live via the on-chart toggle buttons -- the
+// inputs are just the starting position, this array is the live switch.
+bool          g_stratOn[NUM_STRATEGIES];
 string        g_slotSkip[NUM_SLOTS]; // why a detected setup was filtered out: "" / "PD" / "RR"
 
 // Dealing range for premium/discount, recomputed once per bar in ScanAllStrategies.
@@ -220,13 +229,9 @@ string FullName(int n)
   }
 bool StrategyEnabled(int n)
   {
-   switch(n)
-     {
-      case 0: return InpEnableFVG;
-      case 1: return InpEnableIFVG;
-      case 2: return InpEnableBreaker;
-     }
-   return false;
+   if(n < 0 || n >= NUM_STRATEGIES)
+      return false;
+   return g_stratOn[n];
   }
 int SlotIndex(int stratNum, bool bull) { return stratNum * 2 + (bull ? 0 : 1); }
 
@@ -247,6 +252,10 @@ int OnInit()
       g_slotActive[i] = false;
       g_slotSkip[i]   = "";
      }
+
+   g_stratOn[0] = InpEnableFVG;
+   g_stratOn[1] = InpEnableIFVG;
+   g_stratOn[2] = InpEnableBreaker;
 
    if(!InpShowDashboard)
       DeleteObjectsByPrefix(DASH_PREFIX);
@@ -271,6 +280,40 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_atrHandle);
    DeleteObjectsByPrefix(OBJ_PREFIX);
    Comment("");
+  }
+
+//+------------------------------------------------------------------+
+//| Click-to-toggle: a press on one of the dashboard strategy buttons |
+//| flips that strategy's runtime on/off and immediately re-scans so  |
+//| the chart (drawings + dashboard) reflects the new state right     |
+//| away instead of waiting for the next bar.                         |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   if(id != CHARTEVENT_OBJECT_CLICK)
+      return;
+
+   for(int n = 0; n < NUM_STRATEGIES; n++)
+     {
+      if(sparam != ToggleButtonName(n))
+         continue;
+
+      g_stratOn[n] = !g_stratOn[n];
+      ObjectSetInteger(0, sparam, OBJPROP_STATE, false);   // pop the button back up
+
+      if(!g_stratOn[n])
+        {
+         ClearSlotDrawing(n, true);
+         ClearSlotDrawing(n, false);
+        }
+
+      if(InpShowDashboard)
+         UpdateToggleButtons();
+
+      ScanAllStrategies();
+      ChartRedraw(0);
+      break;
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -359,6 +402,11 @@ void ScanAllStrategies()
 
    g_diagBull = DiagSweepBOS(rates, total, true);
    g_diagBear = DiagSweepBOS(rates, total, false);
+
+   // Wipe last bar's shared Sweep/BOS lines so this bar's pass rebuilds them
+   // fresh (DrawSetupLines re-creates only one copy per distinct sequence).
+   if(DrawingsAllowed())
+      DeleteObjectsByPrefix(OBJ_PREFIX + "SH_");
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
      {
@@ -736,9 +784,11 @@ int CollectSweepBOS(const MqlRates &r[], int total, bool bullish, SeqSweepBOS &o
       out[sz].sweepExtreme = sPrice;
       out[sz].sweepLevel   = level;
       out[sz].sweepTime    = r[i].time;
+      out[sz].sweepBreakTime = r[sIdx].time;
       out[sz].bosIdx       = mssIdx;
       out[sz].bosLevel     = mssLevel;
       out[sz].bosTime      = r[refIdx].time;
+      out[sz].bosBreakTime = r[mssIdx].time;
       if(ArraySize(out) >= cap)
          break;
      }
@@ -876,8 +926,8 @@ bool BuildSetup_FVG(const MqlRates &r[], int total, bool bullish, const SeqSweep
       return false;
 
    FillSetupCommon(o, 0, bullish);
-   o.sweepLevel = q.sweepLevel; o.sweepTime = q.sweepTime;
-   o.bosLevel   = q.bosLevel;   o.bosTime   = q.bosTime;
+   o.sweepLevel = q.sweepLevel; o.sweepTime = q.sweepTime; o.sweepEndTime = q.sweepBreakTime;
+   o.bosLevel   = q.bosLevel;   o.bosTime   = q.bosTime;   o.bosEndTime   = q.bosBreakTime;
    o.isZone = true; o.zoneHigh = fvgHigh; o.zoneLow = fvgLow; o.zoneTime = ftl;
    int fvgIdx = TimeToIndex(r, total, ftr);
    if(fvgIdx < 0) fvgIdx = 0;
@@ -902,8 +952,8 @@ bool BuildSetup_IFVG(const MqlRates &r[], int total, bool bullish, const SeqSwee
       return false;
 
    FillSetupCommon(o, 1, bullish);
-   o.sweepLevel = q.sweepLevel; o.sweepTime = q.sweepTime;
-   o.bosLevel   = q.bosLevel;   o.bosTime   = q.bosTime;
+   o.sweepLevel = q.sweepLevel; o.sweepTime = q.sweepTime; o.sweepEndTime = q.sweepBreakTime;
+   o.bosLevel   = q.bosLevel;   o.bosTime   = q.bosTime;   o.bosEndTime   = q.bosBreakTime;
    o.isZone = true; o.zoneHigh = zHi; o.zoneLow = zLo; o.zoneTime = tl;
    o.stage  = StageFromZone(r, zLo, zHi);
    o.tested = ZoneTested(r, invIdx, zLo, zHi);   // "tested" = a retest AFTER the inversion
@@ -958,8 +1008,8 @@ bool BuildSetup_Breaker(const MqlRates &r[], int total, bool bullish, const SeqS
 
    double zoneLo = r[ob].low, zoneHi = r[ob].high;
    FillSetupCommon(o, 2, bullish);
-   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime;
-   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;
+   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime; o.sweepEndTime = q.sweepBreakTime;
+   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;   o.bosEndTime   = q.bosBreakTime;
    o.isZone = true; o.zoneHigh = zoneHi; o.zoneLow = zoneLo; o.zoneTime = r[ob].time;
    o.stage  = StageFromZone(r, zoneLo, zoneHi);
    o.tested = ZoneTested(r, flip, zoneLo, zoneHi); // "tested" = a retest AFTER the violation
@@ -1190,12 +1240,16 @@ void DrawSetup(const IctSetup &s)
       ObjectSetInteger(0, lvlname, OBJPROP_RAY_RIGHT, false);
      }
 
+   // Stagger each strategy's tag a few bars further right of the zone's left
+   // edge. When two strategies' zones sit close in both price and time their
+   // tags would otherwise land on the exact same pixel and render as garbage.
+   datetime tagTime = s.zoneTime + (datetime)(PeriodSeconds(EffectiveLTF()) * (1 + 3 * s.stratNum));
    string lname = base + "Lbl";
-   ObjectCreate(0, lname, OBJ_TEXT, 0, s.zoneTime, s.zoneHigh);
+   ObjectCreate(0, lname, OBJ_TEXT, 0, tagTime, s.zoneHigh);
    ObjectSetString(0, lname, OBJPROP_TEXT, " " + tag);
    ObjectSetInteger(0, lname, OBJPROP_COLOR, InpColorText);          // black on a white chart
    ObjectSetInteger(0, lname, OBJPROP_ANCHOR, s.bullish ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
-   ObjectSetInteger(0, lname, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, lname, OBJPROP_FONTSIZE, 7);
 
    // Full anatomy: Sweep + BOS levels, plus Entry/SL/TP for every actionable
    // setup (forming AND ready -- so you see the planned trade before price
@@ -1226,10 +1280,29 @@ void DrawHLine(string name, datetime t1, datetime t2, double price, color col, E
 //+------------------------------------------------------------------+
 void DrawSetupLines(string base, const IctSetup &s, datetime tRight)
   {
+   // Sweep/BOS are the SHARED gate every strategy reads, so two or three
+   // strategies often latch onto the exact same sequence. Drawing them under
+   // a content-keyed name (direction + anchor + level) instead of the
+   // per-slot base means identical sequences collapse onto one pair of
+   // lines instead of stacking 2-3 identical copies on top of each other.
+   // Each line also stops at the candle that actually did the poking/
+   // closing, instead of running all the way to "now" past where it
+   // stopped mattering.
+   string dir = s.bullish ? "B" : "S";
    if(s.sweepTime > 0)
-      DrawHLine(base + "Sweep", s.sweepTime, tRight, s.sweepLevel, InpColorSweep, STYLE_DASH, "Sweep");
+     {
+      string skey = OBJ_PREFIX + "SH_SWEEP_" + dir + "_" + IntegerToString((int)s.sweepTime);
+      datetime sEnd = (s.sweepEndTime > s.sweepTime) ? s.sweepEndTime : tRight;
+      if(ObjectFind(0, skey) < 0)
+         DrawHLine(skey, s.sweepTime, sEnd, s.sweepLevel, InpColorSweep, STYLE_DASH, "Sweep");
+     }
    if(s.bosTime > 0)
-      DrawHLine(base + "BOS", s.bosTime, tRight, s.bosLevel, InpColorBOS, STYLE_DASH, "BOS");
+     {
+      string bkey = OBJ_PREFIX + "SH_BOS_" + dir + "_" + IntegerToString((int)s.bosTime);
+      datetime bEnd = (s.bosEndTime > s.bosTime) ? s.bosEndTime : tRight;
+      if(ObjectFind(0, bkey) < 0)
+         DrawHLine(bkey, s.bosTime, bEnd, s.bosLevel, InpColorBOS, STYLE_DASH, "BOS");
+     }
    if(InpDrawTradeLines && s.hasTrade)
      {
       DrawHLine(base + "Entry", s.zoneTime, tRight, s.entry, InpColorEntry, STYLE_DASH,  "Entry");
@@ -1373,12 +1446,15 @@ void EnsureDashboardObjects()
                     "S0","S1","S2",
                     "Acct","Pos","Spread","Hist"};
 
+   int btnH = 22, btnGap = 6;
+   int btnY = y + ArraySize(rows) * rowH + 10;
+
    ObjectCreate(0, DASH_PREFIX + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_XDISTANCE, x - 6);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_YDISTANCE, y - 6);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_XSIZE, w);
-   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_YSIZE, ArraySize(rows) * rowH + 12);
+   ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_YSIZE, (btnY - y) + btnH + 12);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_BGCOLOR, C'18,18,18');
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_COLOR, clrSilver);
    ObjectSetInteger(0, DASH_PREFIX + "BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
@@ -1398,6 +1474,46 @@ void EnsureDashboardObjects()
       ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+
+   // One click-to-toggle button per strategy, side by side along the bottom
+   // of the dashboard. Click flips that strategy's runtime on/off state
+   // (see OnChartEvent) -- no need to touch inputs or restart the EA.
+   int btnW = (w - 2 * btnGap) / NUM_STRATEGIES;
+   for(int n = 0; n < NUM_STRATEGIES; n++)
+     {
+      string name = ToggleButtonName(n);
+      ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x + n * (btnW + btnGap));
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, btnY);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, btnW);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, btnH);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, clrBlack);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
+     }
+   UpdateToggleButtons();
+  }
+
+string ToggleButtonName(int n) { return DASH_PREFIX + "Btn_" + IntegerToString(n); }
+
+void UpdateToggleButtons()
+  {
+   for(int n = 0; n < NUM_STRATEGIES; n++)
+     {
+      string name = ToggleButtonName(n);
+      if(ObjectFind(0, name) < 0)
+         continue;
+      bool on = StrategyEnabled(n);
+      ObjectSetString(0, name, OBJPROP_TEXT, ShortCode(n) + ": " + (on ? "ON" : "OFF"));
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, on ? clrForestGreen : clrFireBrick);
+      ObjectSetInteger(0, name, OBJPROP_STATE, false);   // keep it a flat toggle, not a sunken button
      }
   }
 
@@ -1509,6 +1625,7 @@ void UpdateDashboard()
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
       SetDashLine("S" + IntegerToString(n), StrategyRowText(n), StrategyRowColor(n));
+   UpdateToggleButtons();
 
    SetDashLine("Acct",  "Equity " + DoubleToString(equity, 2) + " | Bal " + DoubleToString(balance, 2), clrWhite);
    SetDashLine("Pos",   "Open: " + IntegerToString(posCount) + " (" + DoubleToString(posLots, 2) + " lots)  P/L " + DoubleToString(posPnL, 2),
