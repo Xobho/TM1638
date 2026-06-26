@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                              IFVG_Basic_EA.mq5    |
-//|     Basic Inversion-FVG scanner (visual only -- no orders).      |
+//|     Inversion-FVG scanner with optional pending-limit auto-trade.|
 //|                                                                  |
 //|  Implements the 6-step Inversion FVG method:                     |
 //|   1. HTF bias        - trade only with the higher-timeframe trend |
@@ -18,8 +18,11 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.00"
-#property description "Basic Inversion FVG scanner (visual only)"
+#property version   "1.10"
+#property description "Inversion FVG scanner + optional pending-limit auto-trade"
+
+#include <Trade\Trade.mqh>
+CTrade g_trade;
 
 //=== Inputs ==========================================================
 input group "=== Timeframe ==="
@@ -71,7 +74,16 @@ input color  InpEqualLiqColor            = clrMediumOrchid;
 
 input group "=== Backtest (on-chart win/loss) ==="
 input bool   InpShowBacktest             = true;        // Tally TP-vs-SL outcomes across the window
-input int    InpBacktestDays             = 14;          // How many days back to evaluate
+input int    InpBacktestDays             = 30;          // How many days back to evaluate (e.g. 30 = a month)
+
+input group "=== Auto-trade (LIVE -- off by default) ==="
+input bool   InpAutoTrade                = false;       // Place pending-limit orders on detected setups
+input double InpLotSize                  = 0.01;        // Fixed lot size
+input int    InpMagic                    = 880011;      // Magic number (this EA's orders)
+input int    InpMaxPositions             = 3;           // Max concurrent orders+positions (this magic)
+input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled limit after N hours (0 = GTC)
+input bool   InpTradeBuys                = true;        // Allow buy setups
+input bool   InpTradeSells               = true;        // Allow sell setups
 
 //=== Globals =========================================================
 #define PFX  "IFVGB_"
@@ -123,6 +135,10 @@ int OnInit()
    g_atr = iATR(_Symbol, _Period, InpATRPeriod);
    if(g_atr == INVALID_HANDLE)
       return INIT_FAILED;
+
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(20);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
 
    g_lastBar = 0;
    Scan();                 // draw immediately on attach, don't wait for a tick
@@ -721,7 +737,10 @@ void Dashboard()
    else
       ObjectSetString(0, DPFX + "BTest", OBJPROP_TEXT, "Backtest: off");
 
-   ObjectSetString(0, DPFX + "Note",   OBJPROP_TEXT, "Chart " + EnumToString((ENUM_TIMEFRAMES)_Period) + "  (scan only, no orders)");
+   string mode = InpAutoTrade ? ("AUTO-TRADE lot " + DoubleToString(InpLotSize, 2) + (TradingAllowed() ? "" : " [blocked]"))
+                              : "scan only (no orders)";
+   ObjectSetString(0, DPFX + "Note",   OBJPROP_TEXT, "Chart " + EnumToString((ENUM_TIMEFRAMES)_Period) + "  (" + mode + ")");
+   ObjectSetInteger(0, DPFX + "Note",  OBJPROP_COLOR, InpAutoTrade ? clrOrange : clrSilver);
   }
 
 //+------------------------------------------------------------------+
@@ -778,6 +797,92 @@ void RunBacktest()
   }
 
 //+------------------------------------------------------------------+
+//| Auto-trade: place a pending LIMIT at each setup's entry edge so    |
+//| the trade triggers the instant price WICKS to the level. Buy setup |
+//| -> BUY LIMIT at the zone top; sell setup -> SELL LIMIT at the zone |
+//| bottom. SL/TP come straight from the setup. Off unless InpAutoTrade|
+//| and the terminal/account/symbol all allow trading (so it only acts |
+//| when the market is actually open and Algo Trading is enabled).     |
+//+------------------------------------------------------------------+
+bool TradingAllowed()
+  {
+   if(!InpAutoTrade)                                                              return false;
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))                                   return false;
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                                         return false;
+   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))                           return false;
+   if((ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED) return false;
+   return true;
+  }
+
+int CountMyOrders()
+  {
+   int c = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol && (long)PositionGetInteger(POSITION_MAGIC) == InpMagic) c++;
+     }
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(OrderGetTicket(i) == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) == _Symbol && (long)OrderGetInteger(ORDER_MAGIC) == InpMagic) c++;
+     }
+   return c;
+  }
+
+bool HasOrderNear(double price)
+  {
+   double atr = GetATR();
+   double tol = (atr > 0) ? 0.15 * atr : 10 * _Point;     // don't stack orders on the same zone
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(OrderGetTicket(i) == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol || (long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+      if(MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - price) <= tol) return true;
+     }
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - price) <= tol) return true;
+     }
+   return false;
+  }
+
+void ManageTrades(const IFVGSetup &setups[], int n)
+  {
+   if(!TradingAllowed()) return;
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   for(int i = 0; i < n; i++)
+     {
+      if(CountMyOrders() >= InpMaxPositions) break;
+      if(setups[i].tested) continue;                       // zone already retested -> chance gone
+      if(setups[i].bullish  && !InpTradeBuys)  continue;
+      if(!setups[i].bullish && !InpTradeSells) continue;
+
+      double entry = NormalizeDouble(setups[i].entry, _Digits);
+      double sl    = NormalizeDouble(setups[i].sl,    _Digits);
+      double tp    = NormalizeDouble(setups[i].tp,    _Digits);
+
+      // A limit only makes sense on the correct side of current price.
+      if(setups[i].bullish) { if(entry >= ask) continue; }  // BUY LIMIT must sit below the ask
+      else                  { if(entry <= bid) continue; }  // SELL LIMIT must sit above the bid
+      if(HasOrderNear(entry)) continue;                     // already have one on this zone
+
+      ENUM_ORDER_TYPE_TIME tt = (InpPendingExpiryHrs > 0) ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
+      datetime exp = (InpPendingExpiryHrs > 0) ? TimeCurrent() + (datetime)(InpPendingExpiryHrs * 3600.0) : 0;
+
+      if(setups[i].bullish)
+         g_trade.BuyLimit(InpLotSize, entry, _Symbol, sl, tp, tt, exp, "IFVG buy");
+      else
+         g_trade.SellLimit(InpLotSize, entry, _Symbol, sl, tp, tt, exp, "IFVG sell");
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| One full scan + redraw.                                           |
 //+------------------------------------------------------------------+
 void Scan()
@@ -808,6 +913,7 @@ void Scan()
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
 
+   ManageTrades(setups, n);
    RunBacktest();
    Dashboard();
   }
