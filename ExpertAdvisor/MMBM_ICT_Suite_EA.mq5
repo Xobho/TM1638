@@ -175,6 +175,11 @@ string        g_slotSkip[NUM_SLOTS]; // why a detected setup was filtered out: "
 double        g_pdHigh = 0.0, g_pdLow = 0.0, g_pdEquilibrium = 0.0;
 bool          g_pdValid = false;
 
+// Shared sweep->BOS gate diagnostic (recomputed once per bar), so the dashboard
+// can show WHERE the chain dies instead of every strategy just going blank.
+string        g_diagBull = "no swing";
+string        g_diagBear = "no swing";
+
 string ShortCode(int n)
   {
    switch(n)
@@ -296,6 +301,9 @@ void ScanAllStrategies()
    int total = CopyRates(_Symbol, InpLTF_Timeframe, 1, 200, rates);
    if(total < 2 * InpSwingLeftRight + 10)
       return;
+
+   g_diagBull = DiagSweepBOS(rates, total, true);
+   g_diagBear = DiagSweepBOS(rates, total, false);
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
      {
@@ -583,6 +591,26 @@ bool FindSweepBOS(const MqlRates &r[], int total, bool bullish,
    bosLevel = mssLevel;
    bosTime  = r[refIdx].time;     // anchor the BOS line at the broken swing's tip, not the break bar
    return true;                                  // sweep older than BOS (bosIdx < sweepIdx)
+  }
+
+//+------------------------------------------------------------------+
+//| Diagnostic mirror of FindSweepBOS: reports which stage of the     |
+//| shared gate failed, so the dashboard can show WHY all three       |
+//| strategies are blank instead of just "-" with no explanation.     |
+//+------------------------------------------------------------------+
+string DiagSweepBOS(const MqlRates &r[], int total, bool bullish)
+  {
+   int sweepIdx; double sweepPrice, liqLevel; datetime liqTime;
+   if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
+      return "no sweep";
+   if(sweepIdx > InpMaxBarsAfterSweep)
+      return StringFormat("sweep@%d>max%d", sweepIdx, InpMaxBarsAfterSweep);
+
+   int mssIdx, refIdx; double mssLevel;
+   if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel, refIdx))
+      return StringFormat("sweep@%d no BOS", sweepIdx);
+
+   return StringFormat("sweep@%d BOS@%d OK", sweepIdx, mssIdx);
   }
 
 //+------------------------------------------------------------------+
@@ -1179,9 +1207,9 @@ void EnsureDashboardObjects()
    if(ObjectFind(0, DASH_PREFIX + "BG") >= 0)
       return;
 
-   int x = 10, y = 20, w = 330, rowH = 16;
+   int x = 10, y = 20, w = 360, rowH = 16;
    // Title, Mode, TF, Bias, Ctx, 3 strategy rows, Acct, Pos, Spread, Hist
-   string rows[] = {"Title","Mode","TF","Bias","Ctx",
+   string rows[] = {"Title","Mode","TF","Bias","Ctx","Diag",
                     "S0","S1","S2",
                     "Acct","Pos","Spread","Hist"};
 
@@ -1316,6 +1344,7 @@ void UpdateDashboard()
      }
    color ctxCol = (InpUseKillzones && !kzOn) ? clrOrange : clrAqua;
    SetDashLine("Ctx", "Ctx: " + kzTxt + " | " + pdTxt, ctxCol);
+   SetDashLine("Diag", "Gate B:" + g_diagBull + " S:" + g_diagBear, clrYellow);
 
    for(int n = 0; n < NUM_STRATEGIES; n++)
       SetDashLine("S" + IntegerToString(n), StrategyRowText(n), StrategyRowColor(n));
