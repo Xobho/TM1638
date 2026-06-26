@@ -161,6 +161,20 @@ struct IctSetup
    datetime bosTime;      // bar that confirmed the BOS
   };
 
+//--- one sweep->BOS sequence (the shared skeleton every strategy reads) -
+// The scan enumerates EVERY valid sequence in the window instead of
+// latching the first, so each strategy classifies against all of them.
+struct SeqSweepBOS
+  {
+   int      sweepIdx;     // bar that swept the pool (newest extreme of the raid)
+   double   sweepExtreme; // the wick price -- the stop sits beyond THIS
+   double   sweepLevel;   // the raided liquidity level (pool)
+   datetime sweepTime;    // the swing bar that was raided (anchor for the Sweep line)
+   int      bosIdx;       // bar that CLOSED through structure (the break)
+   double   bosLevel;     // the broken swing's level
+   datetime bosTime;      // the broken swing bar (anchor for the BOS line)
+  };
+
 //--- globals -----------------------------------------------------------
 CTrade        g_trade;
 CSymbolInfo   g_symbol;
@@ -359,15 +373,67 @@ void ScanAllStrategies()
   }
 
 //+------------------------------------------------------------------+
-//| Dispatch to the right detector for a strategy number.             |
+//| Build strategy n's setup from ONE sweep->BOS sequence.            |
 //+------------------------------------------------------------------+
-bool RunDetector(int n, bool bull, const MqlRates &r[], int total, IctSetup &o)
+bool BuildFromSeq(int n, bool bull, const MqlRates &r[], int total, const SeqSweepBOS &q, IctSetup &o)
   {
    switch(n)
      {
-      case 0: return Detect_FVG(r, total, bull, o);
-      case 1: return Detect_IFVG(r, total, bull, o);
-      case 2: return Detect_Breaker(r, total, bull, o);
+      case 0: return BuildSetup_FVG(r, total, bull, q, o);
+      case 1: return BuildSetup_IFVG(r, total, bull, q, o);
+      case 2: return BuildSetup_Breaker(r, total, bull, q, o);
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| A setup clears the two hard filters (right half of the range +   |
+//| min reward:risk). Mirrors the filter the scan loop applies, so   |
+//| the enumeration can PREFER a fully-tradable sequence over one    |
+//| that would only get rejected.                                    |
+//+------------------------------------------------------------------+
+bool SetupAcceptable(const IctSetup &s)
+  {
+   if(!PremiumDiscountOK(s))             return false;
+   if(s.hasTrade && s.rr < InpMinRR)     return false;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Run strategy n over ALL sweep->BOS sequences and return the best |
+//| match: the first (freshest) sequence that yields a setup passing |
+//| both hard filters. If none passes, fall back to the first        |
+//| structurally-valid setup so the dashboard can still report WHY   |
+//| it was filtered (PD / RR) instead of just going blank.           |
+//+------------------------------------------------------------------+
+bool RunDetector(int n, bool bull, const MqlRates &r[], int total, IctSetup &o)
+  {
+   SeqSweepBOS seqs[];
+   int ns = CollectSweepBOS(r, total, bull, seqs);
+   if(ns == 0)
+      return false;
+
+   IctSetup fallback; bool haveFallback = false;
+   for(int s = 0; s < ns; s++)
+     {
+      IctSetup cand; ZeroMemory(cand);
+      if(!BuildFromSeq(n, bull, r, total, seqs[s], cand))
+         continue;
+      if(SetupAcceptable(cand))           // fully tradable -> take it immediately
+        {
+         o = cand;
+         return true;
+        }
+      if(!haveFallback)                    // remember the first valid-but-filtered one
+        {
+         fallback = cand;
+         haveFallback = true;
+        }
+     }
+   if(haveFallback)
+     {
+      o = fallback;                        // scan loop will tag the PD/RR skip reason
+      return true;
      }
    return false;
   }
@@ -542,20 +608,26 @@ bool FindLiquiditySweep(const MqlRates &r[], int total, bool bullish, int &sweep
 bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int sweepIdx, int &mssIdx, double &mssLevel, int &refIdx)
   {
    int k = InpLiquiditySwingBars;   // the broken swing (BOS) must be a PROPER pivot too
-   double refLevel = 0; bool found = false; int swingIdx = -1;
+   // Scan candidate reference swings (nearest the sweep first). The OLD code
+   // took only the first swing and gave up if it wasn't broken; here we keep
+   // trying more-recent swings until one is actually broken -- so a valid BOS
+   // deeper in the leg isn't missed.
    for(int i = sweepIdx - k; i >= k; i--)
      {
-      if(bullish && IsSwingHigh(r, i, k))  { refLevel = r[i].high; swingIdx = i; found = true; break; }
-      if(!bullish && IsSwingLow(r, i, k))  { refLevel = r[i].low;  swingIdx = i; found = true; break; }
-     }
-   if(!found)
-      return false;
-   for(int j = sweepIdx - 1; j >= 0; j--)
-     {
-      // mssIdx = the bar that CLOSED through the level (where structure broke);
-      // refIdx = the swing bar that DEFINES the level (where the line anchors).
-      if(bullish && r[j].close > refLevel)  { mssIdx = j; mssLevel = refLevel; refIdx = swingIdx; return true; }
-      if(!bullish && r[j].close < refLevel) { mssIdx = j; mssLevel = refLevel; refIdx = swingIdx; return true; }
+      bool isRef = bullish ? IsSwingHigh(r, i, k) : IsSwingLow(r, i, k);
+      if(!isRef)
+         continue;
+      double refLevel = bullish ? r[i].high : r[i].low;
+      // The break must come AFTER the reference swing formed (newer bar = lower
+      // index), so the search starts at i-1, never between the sweep and swing.
+      for(int j = i - 1; j >= 0; j--)
+        {
+         // mssIdx = the bar that CLOSED through the level (where structure broke);
+         // refIdx = the swing bar that DEFINES the level (where the line anchors).
+         if(bullish && r[j].close > refLevel)  { mssIdx = j; mssLevel = refLevel; refIdx = i; return true; }
+         if(!bullish && r[j].close < refLevel) { mssIdx = j; mssLevel = refLevel; refIdx = i; return true; }
+        }
+      // this swing was never broken -> try the next (more recent) candidate
      }
    return false;
   }
@@ -582,52 +654,87 @@ bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, d
   }
 
 //+------------------------------------------------------------------+
-//| The mandatory Sweep -> BOS gate. Returns the sweep extreme (for   |
-//| the stop) and the BOS bar/level. All three detectors call this    |
-//| first and bail out if the full sequence isn't present.            |
+//| The mandatory Sweep -> BOS gate -- ENUMERATED. Instead of latching |
+//| the first sweep and giving up, this walks EVERY proper swing pool  |
+//| in the window, and for each one that was both swept (recently      |
+//| enough) AND followed by a Break Of Structure, records the full     |
+//| sequence. The result is sorted freshest-sweep-first, so the three  |
+//| strategies classify against the most actionable sequences first    |
+//| but can still fall through to older ones. This is what makes the   |
+//| engine read "all the conditions in the market" rather than one.    |
 //+------------------------------------------------------------------+
-bool FindSweepBOS(const MqlRates &r[], int total, bool bullish,
-                  int &sweepIdx, double &sweepExtreme,
-                  double &sweepLevel, datetime &sweepTime,
-                  int &bosIdx, double &bosLevel, datetime &bosTime)
+int CollectSweepBOS(const MqlRates &r[], int total, bool bullish, SeqSweepBOS &out[])
   {
-   double sweepPrice, liqLevel; datetime liqTime;
-   if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
-      return false;
-   if(sweepIdx > HoursToBars(InpSweepFreshnessHours))
-      return false;
-   sweepExtreme = sweepPrice;     // the wick extreme -- the stop sits beyond THIS
-   sweepLevel   = liqLevel;       // the raided liquidity level -- the Sweep line sits HERE
-   sweepTime    = liqTime;        // the swing bar that was raided (line anchors to its tip)
+   ArrayResize(out, 0);
+   int k       = InpLiquiditySwingBars;
+   int maxFresh = HoursToBars(InpSweepFreshnessHours);
+   int cap     = 40;              // bound on sequences per direction (cost + object sanity)
 
-   int mssIdx, refIdx; double mssLevel;
-   if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel, refIdx))
-      return false;
-   bosIdx   = mssIdx;             // the breaking bar -- used by the zone search logic
-   bosLevel = mssLevel;
-   bosTime  = r[refIdx].time;     // anchor the BOS line at the broken swing's tip, not the break bar
-   return true;                                  // sweep older than BOS (bosIdx < sweepIdx)
+   for(int i = k + 1; i < total - k; i++)   // pools, most-recent first
+     {
+      bool isPool = bullish ? IsSwingLow(r, i, k) : IsSwingHigh(r, i, k);
+      if(!isPool)
+         continue;
+      double level = bullish ? r[i].low : r[i].high;
+
+      // First poke through this pool AFTER it formed = the sweep event itself.
+      int    sIdx = -1; double sPrice = 0.0;
+      for(int j = i - k - 1; j >= 0; j--)
+        {
+         if(bullish  && r[j].low  < level && r[j].close > level) { sIdx = j; sPrice = r[j].low;  break; }
+         if(!bullish && r[j].high > level && r[j].close < level) { sIdx = j; sPrice = r[j].high; break; }
+        }
+      if(sIdx < 0)                 continue;   // pool never swept
+      if(sIdx > maxFresh)          continue;   // sweep too stale to be a live setup -- skip, keep scanning
+
+      int mssIdx, refIdx; double mssLevel;
+      if(!FindMarketStructureShift(r, total, bullish, sIdx, mssIdx, mssLevel, refIdx))
+         continue;                             // swept but no BOS followed -- not a sequence
+
+      int sz = ArraySize(out);
+      ArrayResize(out, sz + 1);
+      out[sz].sweepIdx     = sIdx;
+      out[sz].sweepExtreme = sPrice;
+      out[sz].sweepLevel   = level;
+      out[sz].sweepTime    = r[i].time;
+      out[sz].bosIdx       = mssIdx;
+      out[sz].bosLevel     = mssLevel;
+      out[sz].bosTime      = r[refIdx].time;
+      if(ArraySize(out) >= cap)
+         break;
+     }
+
+   // Sort freshest sweep first (smallest sweepIdx). Small array -> simple sort.
+   int n = ArraySize(out);
+   for(int a = 0; a < n - 1; a++)
+      for(int b = 0; b < n - 1 - a; b++)
+         if(out[b].sweepIdx > out[b + 1].sweepIdx)
+           {
+            SeqSweepBOS tmp = out[b]; out[b] = out[b + 1]; out[b + 1] = tmp;
+           }
+   return n;
   }
 
 //+------------------------------------------------------------------+
-//| Diagnostic mirror of FindSweepBOS: reports which stage of the     |
-//| shared gate failed, so the dashboard can show WHY all three       |
-//| strategies are blank instead of just "-" with no explanation.     |
+//| Diagnostic for the shared gate: how many sweep->BOS sequences     |
+//| exist (or, if none, which stage failed), so the dashboard can      |
+//| show WHY the strategies are blank instead of just "-".            |
 //+------------------------------------------------------------------+
 string DiagSweepBOS(const MqlRates &r[], int total, bool bullish)
   {
+   SeqSweepBOS seqs[];
+   int n = CollectSweepBOS(r, total, bullish, seqs);
+   if(n > 0)
+      return StringFormat("%d seq (sw@%d)", n, seqs[0].sweepIdx);
+
+   // No full sequence -- report how far the nearest single path got, so the
+   // dashboard still says WHY (no pool swept / swept-but-stale / swept-no-BOS).
    int sweepIdx; double sweepPrice, liqLevel; datetime liqTime;
    if(!FindLiquiditySweep(r, total, bullish, sweepIdx, sweepPrice, liqLevel, liqTime))
       return "no sweep";
-   int maxBars = HoursToBars(InpSweepFreshnessHours);
-   if(sweepIdx > maxBars)
-      return StringFormat("sweep@%d>max%d", sweepIdx, maxBars);
-
-   int mssIdx, refIdx; double mssLevel;
-   if(!FindMarketStructureShift(r, total, bullish, sweepIdx, mssIdx, mssLevel, refIdx))
-      return StringFormat("sweep@%d no BOS", sweepIdx);
-
-   return StringFormat("sweep@%d BOS@%d OK", sweepIdx, mssIdx);
+   if(sweepIdx > HoursToBars(InpSweepFreshnessHours))
+      return StringFormat("stale sw@%d", sweepIdx);
+   return StringFormat("sw@%d no BOS", sweepIdx);
   }
 
 //+------------------------------------------------------------------+
@@ -716,22 +823,17 @@ bool FindInversionFVG(const MqlRates &r[], int total, bool bullish, int bosIdx, 
 //+------------------------------------------------------------------+
 //| Strategy 1: Sweep -> BOS -> FVG                                   |
 //| Entry in the fair value gap left inside the BOS impulse leg, in   |
-//| the new bias direction. (Detect_FVG)                             |
+//| the new bias direction. (BuildSetup_FVG)                         |
 //+------------------------------------------------------------------+
-bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
+bool BuildSetup_FVG(const MqlRates &r[], int total, bool bullish, const SeqSweepBOS &q, IctSetup &o)
   {
-   int sweepIdx, bosIdx;
-   double sweepExtreme, sweepLevel, bosLevel; datetime sweepTime, bosTime;
-   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, sweepLevel, sweepTime, bosIdx, bosLevel, bosTime))
-      return false;
-
    double fvgHigh, fvgLow; datetime ftl, ftr;
-   if(!FindEntryFVG(r, sweepIdx, bosIdx, bullish, fvgHigh, fvgLow, ftl, ftr))
+   if(!FindEntryFVG(r, q.sweepIdx, q.bosIdx, bullish, fvgHigh, fvgLow, ftl, ftr))
       return false;
 
    FillSetupCommon(o, 0, bullish);
-   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime;
-   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;
+   o.sweepLevel = q.sweepLevel; o.sweepTime = q.sweepTime;
+   o.bosLevel   = q.bosLevel;   o.bosTime   = q.bosTime;
    o.isZone = true; o.zoneHigh = fvgHigh; o.zoneLow = fvgLow; o.zoneTime = ftl;
    int fvgIdx = TimeToIndex(r, total, ftr);
    if(fvgIdx < 0) fvgIdx = 0;
@@ -739,7 +841,7 @@ bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
    o.tested = ZoneTested(r, fvgIdx, fvgLow, fvgHigh);
 
    double entry, sl, tp;
-   ComputeZoneTrade(r, total, bullish, fvgHigh, fvgLow, sweepExtreme, entry, sl, tp);
+   ComputeZoneTrade(r, total, bullish, fvgHigh, fvgLow, q.sweepExtreme, entry, sl, tp);
    SetTrade(o, entry, sl, tp);
    return true;
   }
@@ -747,28 +849,23 @@ bool Detect_FVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
 //+------------------------------------------------------------------+
 //| Strategy 2: Sweep -> BOS -> Inversion FVG                         |
 //| An opposing FVG the BOS move closed through (flipped); entry on   |
-//| the retest of that inverted zone. (Detect_IFVG)                  |
+//| the retest of that inverted zone. (BuildSetup_IFVG)              |
 //+------------------------------------------------------------------+
-bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
+bool BuildSetup_IFVG(const MqlRates &r[], int total, bool bullish, const SeqSweepBOS &q, IctSetup &o)
   {
-   int sweepIdx, bosIdx;
-   double sweepExtreme, sweepLevel, bosLevel; datetime sweepTime, bosTime;
-   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, sweepLevel, sweepTime, bosIdx, bosLevel, bosTime))
-      return false;
-
    double zHi, zLo; datetime tl, tr; int invIdx;
-   if(!FindInversionFVG(r, total, bullish, bosIdx, sweepIdx, zHi, zLo, tl, tr, invIdx))
+   if(!FindInversionFVG(r, total, bullish, q.bosIdx, q.sweepIdx, zHi, zLo, tl, tr, invIdx))
       return false;
 
    FillSetupCommon(o, 1, bullish);
-   o.sweepLevel = sweepLevel; o.sweepTime = sweepTime;
-   o.bosLevel   = bosLevel;   o.bosTime   = bosTime;
+   o.sweepLevel = q.sweepLevel; o.sweepTime = q.sweepTime;
+   o.bosLevel   = q.bosLevel;   o.bosTime   = q.bosTime;
    o.isZone = true; o.zoneHigh = zHi; o.zoneLow = zLo; o.zoneTime = tl;
    o.stage  = StageFromZone(r, zLo, zHi);
    o.tested = ZoneTested(r, invIdx, zLo, zHi);   // "tested" = a retest AFTER the inversion
 
    double entry, sl, tp;
-   ComputeZoneTrade(r, total, bullish, zHi, zLo, sweepExtreme, entry, sl, tp);
+   ComputeZoneTrade(r, total, bullish, zHi, zLo, q.sweepExtreme, entry, sl, tp);
    SetTrade(o, entry, sl, tp);
    return true;
   }
@@ -776,14 +873,13 @@ bool Detect_IFVG(const MqlRates &r[], int total, bool bullish, IctSetup &o)
 //+------------------------------------------------------------------+
 //| Strategy 3: Sweep -> BOS -> Breaker Block                        |
 //| The opposing order block the BOS move violated (closed through)   |
-//| and flipped; entry on the retest of that breaker. (Detect_Breaker)|
+//| and flipped; entry on the retest of that breaker.(BuildSetup_Breaker)|
 //+------------------------------------------------------------------+
-bool Detect_Breaker(const MqlRates &r[], int total, bool bullish, IctSetup &o)
+bool BuildSetup_Breaker(const MqlRates &r[], int total, bool bullish, const SeqSweepBOS &q, IctSetup &o)
   {
-   int sweepIdx, bosIdx;
-   double sweepExtreme, sweepLevel, bosLevel; datetime sweepTime, bosTime;
-   if(!FindSweepBOS(r, total, bullish, sweepIdx, sweepExtreme, sweepLevel, sweepTime, bosIdx, bosLevel, bosTime))
-      return false;
+   int sweepIdx = q.sweepIdx, bosIdx = q.bosIdx;
+   double sweepExtreme = q.sweepExtreme, sweepLevel = q.sweepLevel, bosLevel = q.bosLevel;
+   datetime sweepTime = q.sweepTime, bosTime = q.bosTime;
 
    int loI = bosIdx + 1, hiI = sweepIdx;          // the leg that built the swept extreme
    if(loI > hiI) return false;
