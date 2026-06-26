@@ -310,6 +310,13 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       if(InpShowDashboard)
          UpdateToggleButtons();
 
+      // Rebuild history too: ScanHistory wipes every HIST_ object and redraws
+      // only the still-enabled strategies, so a strategy switched OFF has its
+      // historical drawings removed (not just its live setup) and one switched
+      // back ON has them restored -- matching the live drawings' behaviour.
+      if(InpHistoryDays > 0 && DrawingsAllowed())
+         ScanHistory();
+
       ScanAllStrategies();
       ChartRedraw(0);
       break;
