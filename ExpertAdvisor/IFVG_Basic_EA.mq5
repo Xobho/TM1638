@@ -55,6 +55,19 @@ input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
 input color  InpTextColor                = clrBlack;    // Label text (black on light charts, white on dark)
 
+input group "=== Liquidity lines ==="
+input bool   InpShowLiquidity            = true;        // Draw untapped liquidity pools
+input bool   InpShowExternal             = true;        // External liquidity = MAJOR swing pools (BSL/SSL)
+input bool   InpShowInternal             = true;        // Internal liquidity = MINOR swing pools inside the range
+input bool   InpShowEqualHL              = true;        // Equal highs / lows (clustered stops)
+input int    InpExtSwingBars             = 10;          // Swing strength for EXTERNAL (major) pools
+input int    InpIntSwingBars             = 3;           // Swing strength for INTERNAL (minor) pools
+input double InpEqualTolATR              = 0.10;        // Equal-HL tolerance as a multiple of ATR
+input int    InpMaxLiqLines              = 8;           // Max lines per type/side (anti-clutter)
+input color  InpExtLiqColor              = clrOrangeRed;
+input color  InpIntLiqColor              = clrSlateGray;
+input color  InpEqualLiqColor            = clrMediumOrchid;
+
 //=== Globals =========================================================
 #define PFX  "IFVGB_"
 #define DPFX "IFVGB_DASH_"
@@ -493,6 +506,145 @@ void DrawStructure(const MqlRates &r[], int total)
   }
 
 //+------------------------------------------------------------------+
+//| Liquidity: a pool is "untapped" until a later candle trades       |
+//| through it. We only draw untapped pools -- those are the live      |
+//| draws on liquidity; tapped ones are spent.                        |
+//+------------------------------------------------------------------+
+bool UntappedHigh(const MqlRates &r[], int i, double level)
+  {
+   for(int j = i - 1; j >= 0; j--)
+      if(r[j].high > level) return false;
+   return true;
+  }
+bool UntappedLow(const MqlRates &r[], int i, double level)
+  {
+   for(int j = i - 1; j >= 0; j--)
+      if(r[j].low < level) return false;
+   return true;
+  }
+
+void LiqLine(string name, datetime t1, datetime t2, double price, color c, int style, int width)
+  {
+   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price)) return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);   // extend to the right = a live target
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+  }
+
+//+------------------------------------------------------------------+
+//| Draw untapped swing pools at strength k. excludeK>0 skips pivots  |
+//| that are ALSO pivots at the larger strength (so internal lines    |
+//| don't double-draw on top of the external ones).                   |
+//+------------------------------------------------------------------+
+void DrawPools(const MqlRates &r[], int total, int k, int excludeK, color c,
+               string tagHi, string tagLo, int width, int style)
+  {
+   datetime tNow = r[0].time;
+   int drawnH = 0, drawnL = 0;
+   for(int i = k; i < total - k; i++)                  // newest -> oldest
+     {
+      if(drawnH < InpMaxLiqLines && IsSwingHigh(r, i, k) &&
+         (excludeK <= 0 || !IsSwingHigh(r, i, excludeK)))
+        {
+         double lvl = r[i].high;
+         if(UntappedHigh(r, i, lvl))
+           {
+            string nm = PFX + "LQ_H" + IntegerToString(width) + "_" + IntegerToString((int)r[i].time);
+            LiqLine(nm, r[i].time, tNow, lvl, c, style, width);
+            if(tagHi != "") TextAt(nm + "t", r[i].time, lvl, tagHi + " ", c, ANCHOR_RIGHT_LOWER);
+            drawnH++;
+           }
+        }
+      if(drawnL < InpMaxLiqLines && IsSwingLow(r, i, k) &&
+         (excludeK <= 0 || !IsSwingLow(r, i, excludeK)))
+        {
+         double lvl = r[i].low;
+         if(UntappedLow(r, i, lvl))
+           {
+            string nm = PFX + "LQ_L" + IntegerToString(width) + "_" + IntegerToString((int)r[i].time);
+            LiqLine(nm, r[i].time, tNow, lvl, c, style, width);
+            if(tagLo != "") TextAt(nm + "t", r[i].time, lvl, tagLo + " ", c, ANCHOR_RIGHT_UPPER);
+            drawnL++;
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Equal highs / lows: two adjacent same-type swings within an ATR   |
+//| tolerance = a clean stop cluster. Drawn only while still untapped. |
+//+------------------------------------------------------------------+
+void DrawEqualHL(const MqlRates &r[], int total, double atr)
+  {
+   double tol = InpEqualTolATR * atr;
+   if(tol <= 0.0) return;
+   int k = InpIntSwingBars;
+   datetime tNow = r[0].time;
+
+   int drawn = 0;
+   for(int i = k; i < total - k && drawn < InpMaxLiqLines; i++)   // equal HIGHS
+     {
+      if(!IsSwingHigh(r, i, k)) continue;
+      for(int j = i + k; j < total - k; j++)
+        {
+         if(!IsSwingHigh(r, j, k)) continue;                       // nearest older swing high
+         if(MathAbs(r[j].high - r[i].high) <= tol)
+           {
+            double y = MathMax(r[i].high, r[j].high);
+            if(UntappedHigh(r, i, y))
+              {
+               string nm = PFX + "LQ_EQH_" + IntegerToString((int)r[i].time);
+               LiqLine(nm, r[j].time, tNow, y, InpEqualLiqColor, STYLE_SOLID, 1);
+               TextAt(nm + "t", r[i].time, y, "EQH ", InpEqualLiqColor, ANCHOR_LEFT_LOWER);
+               drawn++;
+              }
+           }
+         break;
+        }
+     }
+
+   drawn = 0;
+   for(int i = k; i < total - k && drawn < InpMaxLiqLines; i++)   // equal LOWS
+     {
+      if(!IsSwingLow(r, i, k)) continue;
+      for(int j = i + k; j < total - k; j++)
+        {
+         if(!IsSwingLow(r, j, k)) continue;
+         if(MathAbs(r[j].low - r[i].low) <= tol)
+           {
+            double y = MathMin(r[i].low, r[j].low);
+            if(UntappedLow(r, i, y))
+              {
+               string nm = PFX + "LQ_EQL_" + IntegerToString((int)r[i].time);
+               LiqLine(nm, r[j].time, tNow, y, InpEqualLiqColor, STYLE_SOLID, 1);
+               TextAt(nm + "t", r[i].time, y, "EQL ", InpEqualLiqColor, ANCHOR_LEFT_UPPER);
+               drawn++;
+              }
+           }
+         break;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Liquidity overlay: external (major) + internal (minor) + equal.   |
+//+------------------------------------------------------------------+
+void DrawLiquidity(const MqlRates &r[], int total)
+  {
+   if(!InpShowLiquidity) return;
+   if(InpShowExternal)
+      DrawPools(r, total, InpExtSwingBars, 0, InpExtLiqColor, "BSL", "SSL", 2, STYLE_SOLID);
+   if(InpShowInternal)
+      DrawPools(r, total, InpIntSwingBars, InpExtSwingBars, InpIntLiqColor, "", "", 1, STYLE_DOT);
+   if(InpShowEqualHL)
+      DrawEqualHL(r, total, GetATR());
+  }
+
+//+------------------------------------------------------------------+
 //| Dashboard                                                         |
 //+------------------------------------------------------------------+
 void Dashboard()
@@ -558,10 +710,12 @@ void Scan()
 
    ComputeHTFBias();
 
-   // wipe last pass (setups + structure), keep the dashboard
+   // wipe last pass (setups + structure + liquidity), keep the dashboard
    ObjectsDeleteAll(0, PFX + "S");
    ObjectsDeleteAll(0, PFX + "MS_");
+   ObjectsDeleteAll(0, PFX + "LQ_");
 
+   DrawLiquidity(r, total);
    DrawStructure(r, total);
 
    IFVGSetup setups[];
