@@ -268,6 +268,13 @@ int OnInit()
    // OnTick otherwise only rescans when a new bar opens.
    g_lastLTFBarTime = iTime(_Symbol, InpLTF_Timeframe, 0);
    ScanAllStrategies();
+
+   // Draw the dashboard now too. It is otherwise only built in OnTick, so on a
+   // quiet/closed market (no ticks) it would never appear after an attach or
+   // recompile even though the setups already drew from ScanHistory above.
+   if(InpShowDashboard)
+      UpdateDashboard();
+
    ChartRedraw(0);
 
    return INIT_SUCCEEDED;
