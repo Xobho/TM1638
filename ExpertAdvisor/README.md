@@ -368,7 +368,7 @@ pattern with no surrounding ICT context (e.g. a stop-hunt entry in the wrong
 half of the range, or in a dead session). Both are on by default:
 
 - **Premium / Discount** (`InpUsePremiumDiscount`): a dealing range is built
-  from the high/low of the last `InpPDRangeBars` bars (default 50); its 50%
+  from the high/low of the last `InpPDRangeHours` hours (default 12.5); its 50%
   is equilibrium. **Buys are only allowed at/below equilibrium (discount),
   sells at/above (premium)** — the core ICT rule that you buy cheap and sell
   expensive within the range. This is a **hard filter applied at detection**:

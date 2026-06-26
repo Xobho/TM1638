@@ -77,9 +77,10 @@ input ENUM_TIMEFRAMES InpLTF_Timeframe        = PERIOD_M15;  // Entry timeframe 
 input int             InpSwingLeftRight       = 3;           // Bars each side to confirm a general structure swing
 input int             InpLiquiditySwingBars   = 5;           // Bars each side to confirm a PROPER swing for the sweep / BOS / TP liquidity (>= InpSwingLeftRight = stronger, more significant pivots)
 input bool            InpRequireHTFBias       = true;        // Only show/trade setups aligned with HTF structure
+input double          InpHTFLookbackHours     = 1200.0;      // How far back (hours) the HTF bias scan looks for swing structure
 input double          InpLookbackHours        = 72.0;        // How far back (hours) the live scan searches for liquidity pools/structure -- a pool can take days to build, so this is time-based, not a fixed bar count
 input double          InpSweepFreshnessHours  = 6.0;         // Max age (hours) a sweep/break may be and still count as a live, tradable setup
-input int             InpMaxBarsForFVGSearch  = 15;          // How far back from the MSS bar to search the entry FVG
+input double          InpMaxFVGSearchHours    = 3.75;        // How far back (hours) from the MSS bar to search the entry FVG
 input double          InpMinFVGSizePoints     = 30;          // Minimum FVG size (points) to be tradable
 input ENUM_ENTRY_MODE InpEntryMode            = ENTRY_FIRST_TOUCH; // Entry price inside the zone: first-touch (wick) / midpoint / far edge
 input double          InpSweepBufferPoints    = 20;          // Stop buffer + zone tolerance (points) for all strategies
@@ -101,7 +102,7 @@ input ulong  InpMagicNumber       = 19380002; // Magic number for this EA's orde
 
 input group "=== Context filters (ICT) ==="
 input bool   InpUsePremiumDiscount = true;  // Only BUY in discount / SELL in premium of the dealing range
-input int    InpPDRangeBars        = 50;    // Bars defining the dealing range (high..low) for premium/discount
+input double InpPDRangeHours       = 12.5;  // Hours defining the dealing range (high..low) for premium/discount
 input bool   InpUseKillzones       = true;  // Only trade inside the session windows below (broker/SERVER time)
 input int    InpKZ1StartHour       = 8;     // Killzone 1 (London) start hour, server time 0-23
 input int    InpKZ1EndHour         = 11;    // Killzone 1 (London) end hour, server time (exclusive)
@@ -450,7 +451,7 @@ void GetHTFBias(bool &bullBias, bool &bearBias)
 
    MqlRates htf[];
    ArraySetAsSeries(htf, true);
-   int n = CopyRates(_Symbol, InpHTF_Timeframe, 1, 300, htf);
+   int n = CopyRates(_Symbol, InpHTF_Timeframe, 1, HoursToBars(InpHTFLookbackHours, InpHTF_Timeframe), htf);
    if(n < 2 * InpSwingLeftRight + 10)
       return;
 
@@ -493,9 +494,11 @@ void GetHTFBias(bool &bullBias, bool &bearBias)
 //| with the chart period instead of meaning a different real-world   |
 //| duration whenever InpLTF_Timeframe changes.                       |
 //+------------------------------------------------------------------+
-int HoursToBars(double hours)
+int HoursToBars(double hours, ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
   {
-   int secs = PeriodSeconds(InpLTF_Timeframe);
+   if(tf == PERIOD_CURRENT)
+      tf = InpLTF_Timeframe;
+   int secs = PeriodSeconds(tf);
    if(secs <= 0) return 1;
    return (int)MathMax(1.0, MathRound(hours * 3600.0 / secs));
   }
@@ -635,7 +638,7 @@ bool FindMarketStructureShift(const MqlRates &r[], int total, bool bullish, int 
 bool FindEntryFVG(const MqlRates &r[], int sweepIdx, int mssIdx, bool bullish, double &fvgHigh, double &fvgLow, datetime &fvgTimeLeft, datetime &fvgTimeRight)
   {
    double minSize = InpMinFVGSizePoints * g_symbol.Point();
-   int searchFrom = MathMin(sweepIdx, mssIdx + InpMaxBarsForFVGSearch);
+   int searchFrom = MathMin(sweepIdx, mssIdx + HoursToBars(InpMaxFVGSearchHours));
    for(int i = mssIdx + 1; i < searchFrom; i++)
      {
       if(i - 1 < 0 || i + 1 >= ArraySize(r))
@@ -777,7 +780,7 @@ bool FindInversionFVG(const MqlRates &r[], int total, bool bullish, int bosIdx, 
                       double &zoneHi, double &zoneLo, datetime &tLeft, datetime &tRight, int &invIdx)
   {
    double minSize = InpMinFVGSizePoints * g_symbol.Point();
-   int hiLimit = MathMin(sweepIdx + InpMaxBarsForFVGSearch, total - 2);
+   int hiLimit = MathMin(sweepIdx + HoursToBars(InpMaxFVGSearchHours), total - 2);
 
    for(int i = bosIdx + 1; i <= hiLimit; i++)
      {
@@ -961,7 +964,7 @@ void ComputePremiumDiscount()
       return;
    MqlRates rr[];
    ArraySetAsSeries(rr, true);
-   int got = CopyRates(_Symbol, InpLTF_Timeframe, 1, InpPDRangeBars, rr);
+   int got = CopyRates(_Symbol, InpLTF_Timeframe, 1, HoursToBars(InpPDRangeHours), rr);
    if(got < 5)
       return;
    double hi = -DBL_MAX, lo = DBL_MAX;
