@@ -97,6 +97,12 @@ bool     g_htfDown    = true;
 int      g_lastBull   = 0;     // counts for the dashboard
 int      g_lastBear   = 0;
 
+// newest setup, for the dashboard "Live" line
+bool     g_liveValid  = false;
+bool     g_liveBull   = false;
+double   g_liveEntry  = 0.0;
+bool     g_liveTested = false;
+
 // backtest tally (filled by RunBacktest, shown on the dashboard)
 int      g_btWins     = 0;
 int      g_btLosses   = 0;
@@ -796,11 +802,11 @@ void Dashboard()
    int x = 8, yTop = 16, panelW = 312, headerH = 22, rowH = 16;
    int keyX = x + 8, valX = x + 124, contentY = yTop + headerH + 5;
 
-   string sfx[]   = {"Sym","Bias","Mkt","Filt","Set","SecBT","WL","WR","Net","OpenT","SecAcc","Eq","Pos","PL","Auto"};
+   string sfx[]   = {"Sym","Bias","Mkt","Filt","Set","SecBT","WL","WR","Net","OpenT","SecAcc","Eq","Pos","PL","Auto","Live"};
    string left[]  = {"Symbol","HTF bias","Spread/ATR","Filters","Setups","--- BACKTEST ---",
                      "Win / Loss","Win rate","Net / PF","Open / no-fill","--- ACCOUNT ---",
-                     "Equity / Bal","Pos / Pend","Float P/L","Auto-trade"};
-   bool   isSec[] = {false,false,false,false,false,true,false,false,false,false,true,false,false,false,false};
+                     "Equity / Bal","Pos / Pend","Float P/L","Auto-trade","Live setup"};
+   bool   isSec[] = {false,false,false,false,false,true,false,false,false,false,true,false,false,false,false,false};
    int    nrows   = ArraySize(sfx);
 
    int btnH = 22, btnY = contentY + nrows * rowH + 4;
@@ -877,6 +883,22 @@ void Dashboard()
    SetVal("Eq",  DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + " / " + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2), clrWhite);
    SetVal("Pos", IntegerToString(pos) + " pos / " + IntegerToString(pend) + " pend", clrWhite);
    SetVal("PL",  DoubleToString(fpl, 2), fpl >= 0 ? clrLime : clrTomato);
+
+   // newest setup + how close it is to triggering
+   if(!g_liveValid)
+      SetVal("Live", "none", clrSilver);
+   else
+     {
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      int    dpts  = (int)MathRound(MathAbs(g_liveEntry - price) / _Point);
+      string dir   = g_liveBull ? "BUY" : "SELL";
+      string st; color stc;
+      if(pos > 0)            { st = "FILLED";  stc = clrLime;   }
+      else if(g_liveTested)  { st = "tested";  stc = clrOrange; }
+      else if(pend > 0)      { st = "pending"; stc = clrAqua;   }
+      else                   { st = "waiting"; stc = clrSilver; }
+      SetVal("Live", dir + " " + DoubleToString(g_liveEntry, _Digits) + "  " + IntegerToString(dpts) + "pts  " + st, stc);
+     }
 
    string autoTxt; color autoCol;
    if(!InpAutoTrade)        { autoTxt = "OFF (scan only)";       autoCol = clrSilver; }
@@ -1097,6 +1119,11 @@ void Scan()
       DrawSetup(setups[i], i);
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
+
+   // setups[0] is the freshest -> feed the dashboard's "Live" line
+   g_liveValid = (n > 0);
+   if(n > 0)
+     { g_liveBull = setups[0].bullish; g_liveEntry = setups[0].entry; g_liveTested = setups[0].tested; }
 
    ManageTrades(setups, n);
    RunBacktest();
