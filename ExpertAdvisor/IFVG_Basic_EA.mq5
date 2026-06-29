@@ -105,6 +105,7 @@ double   g_btTotalR   = 0.0;
 double   g_btGrossWin = 0.0;   // sum of +R on winners (for profit factor)
 
 MqlRates g_htf[];              // cached higher-timeframe bars (for as-of-time bias)
+bool     g_tradingHalted = false;  // on-chart STOP button: blocks NEW trades
 
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
@@ -177,6 +178,16 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
+   if(id == CHARTEVENT_OBJECT_CLICK && sparam == DPFX + "BtnStop")
+     {
+      g_tradingHalted = !g_tradingHalted;
+      ObjectSetInteger(0, sparam, OBJPROP_STATE, false);   // keep it a flat toggle
+      if(g_tradingHalted)
+         CancelMyPendings();                               // stop -> pull unfilled limits
+      Dashboard();
+      ChartRedraw(0);
+      return;
+     }
    if(id == CHARTEVENT_CHART_CHANGE)
       ChartRedraw(0);
   }
@@ -786,12 +797,29 @@ void Dashboard()
    bool   isSec[] = {false,false,false,false,false,true,false,false,false,false,true,false,false,false,false};
    int    nrows   = ArraySize(sfx);
 
+   int btnH = 22, btnY = contentY + nrows * rowH + 4;
    if(ObjectFind(0, DPFX + "BG") < 0)
      {
-      MkRect("BG", x, yTop, panelW, headerH + nrows * rowH + 8, C'24,26,32', C'70,80,95');
-      MkRect("HB", x, yTop, panelW, headerH,                    C'33,82,120', C'33,82,120');
+      MkRect("BG", x, yTop, panelW, (btnY - yTop) + btnH + 8, C'24,26,32', C'70,80,95');
+      MkRect("HB", x, yTop, panelW, headerH,                  C'33,82,120', C'33,82,120');
       MkLbl ("Hdr", keyX, yTop + 4, clrWhite, 10);
       ObjectSetString(0, DPFX + "Hdr", OBJPROP_TEXT, "INVERSION FVG");
+
+      // click-to-stop button along the bottom of the panel
+      string bn = DPFX + "BtnStop";
+      ObjectCreate(0, bn, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetInteger(0, bn, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bn, OBJPROP_XDISTANCE, keyX);
+      ObjectSetInteger(0, bn, OBJPROP_YDISTANCE, btnY);
+      ObjectSetInteger(0, bn, OBJPROP_XSIZE, panelW - 16);
+      ObjectSetInteger(0, bn, OBJPROP_YSIZE, btnH);
+      ObjectSetString (0, bn, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, bn, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, bn, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, bn, OBJPROP_BORDER_COLOR, clrBlack);
+      ObjectSetInteger(0, bn, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, bn, OBJPROP_ZORDER, 10);
+
       for(int i = 0; i < nrows; i++)
         {
          int ry = contentY + i * rowH;
@@ -845,7 +873,8 @@ void Dashboard()
    SetVal("PL",  DoubleToString(fpl, 2), fpl >= 0 ? clrLime : clrTomato);
 
    string autoTxt; color autoCol;
-   if(!InpAutoTrade) { autoTxt = "OFF (scan only)"; autoCol = clrSilver; }
+   if(!InpAutoTrade)        { autoTxt = "OFF (scan only)";       autoCol = clrSilver; }
+   else if(g_tradingHalted) { autoTxt = "STOPPED (Stop button)"; autoCol = clrOrange; }
    else
      {
       string br = TradeBlockReason();
@@ -853,6 +882,19 @@ void Dashboard()
       else         { autoTxt = "BLOCKED: " + br;                          autoCol = clrTomato; }
      }
    SetVal("Auto", autoTxt, autoCol);
+
+   // STOP / RESUME button reflects the halt state.
+   string bn = DPFX + "BtnStop";
+   if(g_tradingHalted)
+     {
+      ObjectSetString (0, bn, OBJPROP_TEXT, "RESUME trading");
+      ObjectSetInteger(0, bn, OBJPROP_BGCOLOR, clrForestGreen);
+     }
+   else
+     {
+      ObjectSetString (0, bn, OBJPROP_TEXT, "STOP new trades");
+      ObjectSetInteger(0, bn, OBJPROP_BGCOLOR, clrFireBrick);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -919,6 +961,7 @@ void RunBacktest()
 // "" = clear to trade; otherwise the exact reason MT5 is blocking us.
 string TradeBlockReason()
   {
+   if(g_tradingHalted)                                          return "stopped (Stop button)";
    if(!TerminalInfoInteger(TERMINAL_CONNECTED))                  return "no connection";
    if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))        return "Algo button OFF (toolbar)";
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                        return "EA 'Allow Algo Trading' off";
@@ -932,6 +975,18 @@ string TradeBlockReason()
 bool TradingAllowed()
   {
    return InpAutoTrade && TradeBlockReason() == "";
+  }
+
+// Cancel this EA's UNFILLED pending limits (open positions are left alone).
+void CancelMyPendings()
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong tk = OrderGetTicket(i);
+      if(tk == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) == _Symbol && (long)OrderGetInteger(ORDER_MAGIC) == InpMagic)
+         g_trade.OrderDelete(tk);
+     }
   }
 
 int CountMyOrders()
