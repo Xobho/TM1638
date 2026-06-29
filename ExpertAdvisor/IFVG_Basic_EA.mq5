@@ -61,6 +61,10 @@ input color  InpStructLowColor           = clrDodgerBlue;
 input int    InpStructSwingBars          = 6;           // Swing strength for market structure (bigger = only significant swings)
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
+input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
+input int    InpMajorSwingBars           = 15;          // Swing strength for MAJOR structure (bigger = only the biggest pivots)
+input int    InpMaxMajorLines            = 4;           // Max major lines per side
+input color  InpMajorStructColor         = clrBlue;     // Major-structure level color
 input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
 input ENUM_TIMEFRAMES InpStructTF2       = PERIOD_H1;   // Extra structure timeframe #1
 input ENUM_TIMEFRAMES InpStructTF3       = PERIOD_H4;   // Extra structure timeframe #2
@@ -670,10 +674,48 @@ int MTFBars(ENUM_TIMEFRAMES tf, int fromBars)
    return (int)MathMax(30.0, MathMin(5000.0, (double)b));
   }
 
+//+------------------------------------------------------------------+
+//| MAJOR structure: the biggest swing highs/lows (strength           |
+//| InpMajorSwingBars) drawn as horizontal level lines extending      |
+//| right -- the significant range structure, not the minor swings.   |
+//| Only the most recent few per side, to stay readable.              |
+//+------------------------------------------------------------------+
+void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
+  {
+   if(!InpShowMajorStruct) return;
+   MqlRates rr[];
+   ArraySetAsSeries(rr, true);
+   int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
+   int k = InpMajorSwingBars;
+   if(total < 2 * k + 5) return;
+
+   datetime tNow = rr[0].time;
+   int hc = 0, lc = 0;
+   for(int i = k; i < total - k; i++)                 // newest -> oldest
+     {
+      if(hc >= InpMaxMajorLines && lc >= InpMaxMajorLines) break;
+      if(hc < InpMaxMajorLines && IsSwingHigh(rr, i, k))
+        {
+         string nm = PFX + "MS_MAJH_" + IntegerToString((int)rr[i].time);
+         LiqLine(nm, rr[i].time, tNow, rr[i].high, InpMajorStructColor, STYLE_SOLID, 2);
+         TextAt(nm + "t", rr[i].time, rr[i].high, "Major H ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
+         hc++;
+        }
+      if(lc < InpMaxMajorLines && IsSwingLow(rr, i, k))
+        {
+         string nm = PFX + "MS_MAJL_" + IntegerToString((int)rr[i].time);
+         LiqLine(nm, rr[i].time, tNow, rr[i].low, InpMajorStructColor, STYLE_SOLID, 2);
+         TextAt(nm + "t", rr[i].time, rr[i].low, "Major L ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
+         lc++;
+        }
+     }
+  }
+
 void DrawStructure(int total)
   {
    if(!InpShowStructure) return;
    DrawStructureTF(_Period, InpStructHighColor, InpStructLowColor, "", total);
+   DrawMajorStructure(_Period, total);
    if(InpMTFStructure)
      {
       DrawStructureTF(InpStructTF2, InpStructTF2Color, InpStructTF2Color, ShortTF(InpStructTF2) + " ", MTFBars(InpStructTF2, total));
