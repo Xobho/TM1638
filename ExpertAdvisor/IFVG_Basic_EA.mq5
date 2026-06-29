@@ -97,8 +97,7 @@ enum ENUM_IFVG_ENTRY
 
 input group "=== Auto-trade (LIVE -- off by default) ==="
 input bool   InpAutoTrade                = false;       // Master switch: let the EA place trades on detected setups
-input ENUM_IFVG_ENTRY InpEntryMode       = ENTRY_LIMIT_RETEST; // How to enter: limit at the retest, or market right now
-input int    InpMarketFreshBars          = 1;           // MARKET mode: only enter if the setup formed within the last N bars (so it enters NOW, not on old setups)
+input ENUM_IFVG_ENTRY InpEntryMode       = ENTRY_LIMIT_RETEST; // How to enter at the retest: resting limit, or market order on touch
 input double InpLotSize                  = 0.01;        // Fixed lot size
 input int    InpMagic                    = 880011;      // Magic number (this EA's orders)
 input int    InpMaxPositions             = 3;           // Max concurrent orders+positions (this magic)
@@ -124,6 +123,8 @@ double   g_liveEntry   = 0.0;
 bool     g_liveTested  = false;
 bool     g_liveWaiting = false;   // monitored one is still waiting to trigger
 datetime g_liveTime    = 0;       // its break-bar anchor (for the watch line)
+double   g_liveSL      = 0.0;     // monitored setup's SL/TP (for market-on-retest entry)
+double   g_liveTP      = 0.0;
 
 // backtest tally (filled by RunBacktest, shown on the dashboard)
 int      g_btWins     = 0;
@@ -226,6 +227,10 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // Market-on-retest is checked EVERY tick so it fires the instant price
+   // touches the entry edge (not only on bar close).
+   TryMarketEntry();
+
    datetime t = iTime(_Symbol, _Period, 0);
    if(t == g_lastBar)
       return;             // setups are detected on closed bars only
@@ -1193,36 +1198,40 @@ bool HasOrderNear(double price)
    return false;
   }
 
-void ManageTrades(const IFVGSetup &setups[], int n)
+// Market-on-RETEST: every tick, if the monitored setup's entry edge is being
+// touched right now, fire a MARKET order. Same trigger as the limit (the
+// retest of the zone) -- just executed at market instead of a resting limit.
+void TryMarketEntry()
   {
-   if(!TradingAllowed()) return;
+   if(InpEntryMode != ENTRY_MARKET_NOW) return;
+   if(!TradingAllowed())                 return;
+   if(!g_liveWaiting)                     return;                 // no setup waiting to be retested
+   if(g_liveTime <= g_lastMktBreakTime)   return;                 // already entered this one
+   if(g_liveBull  && !InpTradeBuys)       return;
+   if(!g_liveBull && !InpTradeSells)      return;
+   if(CountMyOrders() >= InpMaxPositions) return;
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl  = NormalizeDouble(g_liveSL, _Digits);
+   double tp  = NormalizeDouble(g_liveTP, _Digits);
 
-   // ---------- MARKET mode: enter NOW on a freshly-formed setup ----------
-   if(InpEntryMode == ENTRY_MARKET_NOW)
-     {
-      datetime freshAfter = iTime(_Symbol, _Period, MathMax(1, InpMarketFreshBars));   // must have formed within the last N bars
-      for(int i = 0; i < n; i++)
-        {
-         if(setups[i].tested) continue;
-         if(setups[i].bullish  && !InpTradeBuys)  continue;
-         if(!setups[i].bullish && !InpTradeSells) continue;
-         if(setups[i].breakTime < freshAfter)      continue;   // not "happening now" -> skip (don't chase old setups)
-         if(setups[i].breakTime <= g_lastMktBreakTime) continue; // already market-entered this setup
-         if(CountMyOrders() >= InpMaxPositions)    break;
+   bool touched = g_liveBull ? (ask <= g_liveEntry)   // price dropped into support edge
+                             : (bid >= g_liveEntry);   // price rallied into resistance edge
+   if(!touched) return;
 
-         double sl = NormalizeDouble(setups[i].sl, _Digits);
-         double tp = NormalizeDouble(setups[i].tp, _Digits);
-         bool ok;
-         if(setups[i].bullish) ok = g_trade.Buy (InpLotSize, _Symbol, ask, sl, tp, "IFVG buy mkt");
-         else                  ok = g_trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "IFVG sell mkt");
-         if(ok) g_lastMktBreakTime = setups[i].breakTime;       // enter each setup once
-         break;                                                 // one market entry per pass
-        }
-      return;
-     }
+   bool ok = g_liveBull ? g_trade.Buy (InpLotSize, _Symbol, ask, sl, tp, "IFVG buy mkt")
+                        : g_trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "IFVG sell mkt");
+   if(ok) g_lastMktBreakTime = g_liveTime;            // enter each setup once
+  }
+
+void ManageTrades(const IFVGSetup &setups[], int n)
+  {
+   if(!TradingAllowed()) return;
+   if(InpEntryMode != ENTRY_LIMIT_RETEST) return;     // market mode is handled per-tick in TryMarketEntry
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    // ---------- LIMIT mode: rest a pending limit at the entry edge ----------
    for(int i = 0; i < n; i++)
@@ -1301,12 +1310,14 @@ void Scan()
       g_liveValid = true; g_liveWaiting = true;
       g_liveBull = setups[i].bullish; g_liveEntry = setups[i].entry;
       g_liveTested = false; g_liveTime = setups[i].breakTime;
+      g_liveSL = setups[i].sl; g_liveTP = setups[i].tp;
       break;
      }
    if(!g_liveValid && n > 0)
      {
       g_liveValid = true; g_liveBull = setups[0].bullish; g_liveEntry = setups[0].entry;
       g_liveTested = setups[0].tested; g_liveTime = setups[0].breakTime;
+      g_liveSL = setups[0].sl; g_liveTP = setups[0].tp;
      }
 
    // Draw the WATCHING level so the monitored point is visible across the chart.
