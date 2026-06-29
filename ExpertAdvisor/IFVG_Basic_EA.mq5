@@ -58,6 +58,11 @@ input color  InpTPColor                  = clrGreen;
 input color  InpSweepColor               = clrMagenta;
 input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
+input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
+input ENUM_TIMEFRAMES InpStructTF2       = PERIOD_H1;   // Extra structure timeframe #1
+input ENUM_TIMEFRAMES InpStructTF3       = PERIOD_H4;   // Extra structure timeframe #2
+input color  InpStructTF2Color           = clrGoldenrod;
+input color  InpStructTF3Color           = clrMediumPurple;
 input color  InpTextColor                = clrBlack;    // Label text (black on light charts, white on dark)
 
 input group "=== Liquidity lines ==="
@@ -97,11 +102,13 @@ bool     g_htfDown    = true;
 int      g_lastBull   = 0;     // counts for the dashboard
 int      g_lastBear   = 0;
 
-// newest setup, for the dashboard "Live" line
-bool     g_liveValid  = false;
-bool     g_liveBull   = false;
-double   g_liveEntry  = 0.0;
-bool     g_liveTested = false;
+// monitored setup, for the dashboard "Live" line + the on-chart WATCHING level
+bool     g_liveValid   = false;
+bool     g_liveBull    = false;
+double   g_liveEntry   = 0.0;
+bool     g_liveTested  = false;
+bool     g_liveWaiting = false;   // monitored one is still waiting to trigger
+datetime g_liveTime    = 0;       // its break-bar anchor (for the watch line)
 
 // backtest tally (filled by RunBacktest, shown on the dashboard)
 int      g_btWins     = 0;
@@ -573,29 +580,52 @@ void DrawSetup(const IFVGSetup &s, int idx)
   }
 
 //+------------------------------------------------------------------+
-//| Market structure: label swing pivots HH/HL/LH/LL across window.   |
+//| Market structure for ONE timeframe: label swing pivots HH/HL/LH/  |
+//| LL across its window. tag prefixes the label (e.g. "H1 ") and is  |
+//| part of the object name so different TFs don't collide.           |
 //+------------------------------------------------------------------+
-void DrawStructure(const MqlRates &r[], int total)
+void DrawStructureTF(ENUM_TIMEFRAMES tf, color hiCol, color loCol, string tag, int barsWanted)
   {
-   if(!InpShowStructure) return;
+   MqlRates rr[];
+   ArraySetAsSeries(rr, true);
+   int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
    int k = InpSwingBars;
    if(total < 2 * k + 5) return;
 
    double lastH = 0, lastL = 0; bool haveH = false, haveL = false;
    for(int i = total - k - 1; i >= k; i--)            // oldest -> newest
      {
-      if(IsSwingHigh(r, i, k))
+      if(IsSwingHigh(rr, i, k))
         {
-         string lbl = !haveH ? "H" : (r[i].high > lastH ? "HH" : "LH");
-         TextAt(PFX + "MS_H_" + IntegerToString((int)r[i].time), r[i].time, r[i].high, lbl, InpStructHighColor, ANCHOR_LOWER);
-         lastH = r[i].high; haveH = true;
+         string lbl = !haveH ? "H" : (rr[i].high > lastH ? "HH" : "LH");
+         TextAt(PFX + "MS_" + tag + "H_" + IntegerToString((int)rr[i].time), rr[i].time, rr[i].high, tag + lbl, hiCol, ANCHOR_LOWER);
+         lastH = rr[i].high; haveH = true;
         }
-      if(IsSwingLow(r, i, k))
+      if(IsSwingLow(rr, i, k))
         {
-         string lbl = !haveL ? "L" : (r[i].low < lastL ? "LL" : "HL");
-         TextAt(PFX + "MS_L_" + IntegerToString((int)r[i].time), r[i].time, r[i].low, lbl, InpStructLowColor, ANCHOR_UPPER);
-         lastL = r[i].low; haveL = true;
+         string lbl = !haveL ? "L" : (rr[i].low < lastL ? "LL" : "HL");
+         TextAt(PFX + "MS_" + tag + "L_" + IntegerToString((int)rr[i].time), rr[i].time, rr[i].low, tag + lbl, loCol, ANCHOR_UPPER);
+         lastL = rr[i].low; haveL = true;
         }
+     }
+  }
+
+// HTF bar count covering the same time span as `fromBars` of the current TF.
+int MTFBars(ENUM_TIMEFRAMES tf, int fromBars)
+  {
+   double span = (double)fromBars * PeriodSeconds(_Period);
+   int b = (int)(span / PeriodSeconds(tf)) + 4 * InpSwingBars + 12;
+   return (int)MathMax(30.0, MathMin(5000.0, (double)b));
+  }
+
+void DrawStructure(int total)
+  {
+   if(!InpShowStructure) return;
+   DrawStructureTF(_Period, InpStructHighColor, InpStructLowColor, "", total);
+   if(InpMTFStructure)
+     {
+      DrawStructureTF(InpStructTF2, InpStructTF2Color, InpStructTF2Color, ShortTF(InpStructTF2) + " ", MTFBars(InpStructTF2, total));
+      DrawStructureTF(InpStructTF3, InpStructTF3Color, InpStructTF3Color, ShortTF(InpStructTF3) + " ", MTFBars(InpStructTF3, total));
      }
   }
 
@@ -1109,7 +1139,7 @@ void Scan()
    ObjectsDeleteAll(0, PFX + "LQ_");
 
    DrawLiquidity(r, total);
-   DrawStructure(r, total);
+   DrawStructure(total);
 
    IFVGSetup setups[];
    int n = FindIFVGs(r, total, setups, InpMaxSetups);
@@ -1120,10 +1150,45 @@ void Scan()
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
 
-   // setups[0] is the freshest -> feed the dashboard's "Live" line
-   g_liveValid = (n > 0);
-   if(n > 0)
-     { g_liveBull = setups[0].bullish; g_liveEntry = setups[0].entry; g_liveTested = setups[0].tested; }
+   // The MONITORED setup = the freshest one still WAITING to trigger (untested
+   // and with its entry still ahead on the correct side). It adapts: when a
+   // newer waiting setup forms, it becomes the one we watch. Falls back to the
+   // freshest setup so the line isn't blank.
+   g_liveValid = false; g_liveWaiting = false;
+   double bidP = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double askP = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   for(int i = 0; i < n; i++)
+     {
+      if(setups[i].tested) continue;
+      bool ahead = setups[i].bullish ? (setups[i].entry < askP) : (setups[i].entry > bidP);
+      if(!ahead) continue;
+      g_liveValid = true; g_liveWaiting = true;
+      g_liveBull = setups[i].bullish; g_liveEntry = setups[i].entry;
+      g_liveTested = false; g_liveTime = setups[i].breakTime;
+      break;
+     }
+   if(!g_liveValid && n > 0)
+     {
+      g_liveValid = true; g_liveBull = setups[0].bullish; g_liveEntry = setups[0].entry;
+      g_liveTested = setups[0].tested; g_liveTime = setups[0].breakTime;
+     }
+
+   // Draw the WATCHING level so the monitored point is visible across the chart.
+   ObjectDelete(0, PFX + "S_watch");
+   ObjectDelete(0, PFX + "S_watchT");
+   if(g_liveWaiting)
+     {
+      ObjectCreate(0, PFX + "S_watch", OBJ_TREND, 0, g_liveTime, g_liveEntry, r[0].time, g_liveEntry);
+      ObjectSetInteger(0, PFX + "S_watch", OBJPROP_COLOR, clrYellow);
+      ObjectSetInteger(0, PFX + "S_watch", OBJPROP_STYLE, STYLE_DASHDOT);
+      ObjectSetInteger(0, PFX + "S_watch", OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, PFX + "S_watch", OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, PFX + "S_watch", OBJPROP_BACK, false);
+      ObjectSetInteger(0, PFX + "S_watch", OBJPROP_SELECTABLE, false);
+      TextAt(PFX + "S_watchT", r[0].time, g_liveEntry,
+             (g_liveBull ? "WATCHING BUY " : "WATCHING SELL ") + DoubleToString(g_liveEntry, _Digits) + " ",
+             clrYellow, ANCHOR_RIGHT_LOWER);
+     }
 
    ManageTrades(setups, n);
    RunBacktest();
