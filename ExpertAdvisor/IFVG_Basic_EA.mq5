@@ -696,16 +696,24 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
       if(hc >= InpMaxMajorLines && lc >= InpMaxMajorLines) break;
       if(hc < InpMaxMajorLines && IsSwingHigh(rr, i, k))
         {
+         double   lvl = rr[i].high;
+         datetime end = tNow;                          // stop the line at first contact
+         for(int j = i - 1; j >= 0; j--)
+            if(rr[j].high >= lvl) { end = rr[j].time; break; }
          string nm = PFX + "MS_MAJH_" + IntegerToString((int)rr[i].time);
-         LiqLine(nm, rr[i].time, tNow, rr[i].high, InpMajorStructColor, STYLE_SOLID, 2);
-         TextAt(nm + "t", rr[i].time, rr[i].high, "Major H ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
+         HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
+         TextAt(nm + "t", rr[i].time, lvl, "Major H ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
          hc++;
         }
       if(lc < InpMaxMajorLines && IsSwingLow(rr, i, k))
         {
+         double   lvl = rr[i].low;
+         datetime end = tNow;
+         for(int j = i - 1; j >= 0; j--)
+            if(rr[j].low <= lvl) { end = rr[j].time; break; }
          string nm = PFX + "MS_MAJL_" + IntegerToString((int)rr[i].time);
-         LiqLine(nm, rr[i].time, tNow, rr[i].low, InpMajorStructColor, STYLE_SOLID, 2);
-         TextAt(nm + "t", rr[i].time, rr[i].low, "Major L ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
+         HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
+         TextAt(nm + "t", rr[i].time, lvl, "Major L ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
          lc++;
         }
      }
