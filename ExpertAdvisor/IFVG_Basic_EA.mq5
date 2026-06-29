@@ -58,6 +58,9 @@ input color  InpTPColor                  = clrGreen;
 input color  InpSweepColor               = clrMagenta;
 input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
+input int    InpStructSwingBars          = 6;           // Swing strength for market structure (bigger = only significant swings)
+input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
+input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
 input ENUM_TIMEFRAMES InpStructTF2       = PERIOD_H1;   // Extra structure timeframe #1
 input ENUM_TIMEFRAMES InpStructTF3       = PERIOD_H4;   // Extra structure timeframe #2
@@ -579,33 +582,82 @@ void DrawSetup(const IFVGSetup &s, int idx)
      }
   }
 
+// Draw one structure break: a line at the broken level + a BOS/CHoCH label.
+void DrawStructBreak(string tag, datetime t1, datetime t2, double price, string label, color c)
+  {
+   string nm = PFX + "MS_" + tag + "BRK_" + IntegerToString((int)t2);
+   if(ObjectFind(0, nm) < 0)
+      ObjectCreate(0, nm, OBJ_TREND, 0, t1, price, t2, price);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, nm, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, nm, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, nm, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, nm, OBJPROP_BACK, false);
+   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+   TextAt(nm + "L", t2, price, " " + label, c, ANCHOR_LEFT);
+  }
+
 //+------------------------------------------------------------------+
-//| Market structure for ONE timeframe: label swing pivots HH/HL/LH/  |
-//| LL across its window. tag prefixes the label (e.g. "H1 ") and is  |
-//| part of the object name so different TFs don't collide.           |
+//| Proper market-structure engine for ONE timeframe.                 |
+//|  - confirms swing highs/lows (fractal, strength InpStructSwingBars)|
+//|  - labels them HH/HL/LH/LL relative to the prior same-type swing   |
+//|  - tracks trend and marks the EVENTS where price CLOSES through    |
+//|    the reference swing:  BOS = continuation, CHoCH = reversal.     |
+//| A swing is only breakable AFTER it is confirmed (no look-ahead),   |
+//| and each reference level fires once. tag namespaces the TF.        |
 //+------------------------------------------------------------------+
 void DrawStructureTF(ENUM_TIMEFRAMES tf, color hiCol, color loCol, string tag, int barsWanted)
   {
    MqlRates rr[];
    ArraySetAsSeries(rr, true);
    int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
-   int k = InpSwingBars;
+   int k = InpStructSwingBars;
    if(total < 2 * k + 5) return;
 
-   double lastH = 0, lastL = 0; bool haveH = false, haveL = false;
-   for(int i = total - k - 1; i >= k; i--)            // oldest -> newest
+   double   refHigh = 0, refLow = 0;     datetime refHighT = 0, refLowT = 0;
+   bool     haveRefHigh = false, haveRefLow = false;
+   int      trend = 0;                    // 1 up, -1 down, 0 none
+   double   prevSH = 0, prevSL = 0;       bool havePrevSH = false, havePrevSL = false;
+
+   for(int i = total - k - 1; i >= 0; i--)        // oldest -> newest
      {
-      if(IsSwingHigh(rr, i, k))
+      double c = rr[i].close;
+
+      // (A) structure break on this close, against the last confirmed swings
+      if(haveRefHigh && c > refHigh)
         {
-         string lbl = !haveH ? "H" : (rr[i].high > lastH ? "HH" : "LH");
-         TextAt(PFX + "MS_" + tag + "H_" + IntegerToString((int)rr[i].time), rr[i].time, rr[i].high, tag + lbl, hiCol, ANCHOR_LOWER);
-         lastH = rr[i].high; haveH = true;
+         bool isBOS = (trend != -1);              // up-break: BOS unless we were bearish
+         DrawStructBreak(tag, refHighT, rr[i].time, refHigh, tag + (isBOS ? "BOS" : "CHoCH"),
+                         isBOS ? InpBOSColor : InpCHoCHColor);
+         trend = 1; haveRefHigh = false;
         }
-      if(IsSwingLow(rr, i, k))
+      else if(haveRefLow && c < refLow)
         {
-         string lbl = !haveL ? "L" : (rr[i].low < lastL ? "LL" : "HL");
-         TextAt(PFX + "MS_" + tag + "L_" + IntegerToString((int)rr[i].time), rr[i].time, rr[i].low, tag + lbl, loCol, ANCHOR_UPPER);
-         lastL = rr[i].low; haveL = true;
+         bool isBOS = (trend != 1);               // down-break: BOS unless we were bullish
+         DrawStructBreak(tag, refLowT, rr[i].time, refLow, tag + (isBOS ? "BOS" : "CHoCH"),
+                         isBOS ? InpBOSColor : InpCHoCHColor);
+         trend = -1; haveRefLow = false;
+        }
+
+      // (B) confirm the swing at j = i+k (it now has k newer bars), set it as the
+      //     new reference, and label it HH/HL/LH/LL vs the prior same-type swing.
+      int j = i + k;
+      if(j <= total - 1 - k)
+        {
+         if(IsSwingHigh(rr, j, k))
+           {
+            refHigh = rr[j].high; refHighT = rr[j].time; haveRefHigh = true;
+            string lbl = !havePrevSH ? "H" : (rr[j].high > prevSH ? "HH" : "LH");
+            TextAt(PFX + "MS_" + tag + "H_" + IntegerToString((int)rr[j].time), rr[j].time, rr[j].high, tag + lbl, hiCol, ANCHOR_LOWER);
+            prevSH = rr[j].high; havePrevSH = true;
+           }
+         if(IsSwingLow(rr, j, k))
+           {
+            refLow = rr[j].low; refLowT = rr[j].time; haveRefLow = true;
+            string lbl = !havePrevSL ? "L" : (rr[j].low < prevSL ? "LL" : "HL");
+            TextAt(PFX + "MS_" + tag + "L_" + IntegerToString((int)rr[j].time), rr[j].time, rr[j].low, tag + lbl, loCol, ANCHOR_UPPER);
+            prevSL = rr[j].low; havePrevSL = true;
+           }
         }
      }
   }
