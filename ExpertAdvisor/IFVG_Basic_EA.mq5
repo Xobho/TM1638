@@ -89,12 +89,20 @@ input group "=== Backtest (on-chart win/loss) ==="
 input bool   InpShowBacktest             = true;        // Tally TP-vs-SL outcomes across the window
 input int    InpBacktestDays             = 30;          // How many days back to evaluate (e.g. 30 = a month)
 
+enum ENUM_IFVG_ENTRY
+  {
+   ENTRY_LIMIT_RETEST,    // Pending limit at the entry edge (waits for the wick/retest)
+   ENTRY_MARKET_NOW       // Market order immediately when the setup forms (enter now)
+  };
+
 input group "=== Auto-trade (LIVE -- off by default) ==="
-input bool   InpAutoTrade                = false;       // Place pending-limit orders on detected setups
+input bool   InpAutoTrade                = false;       // Master switch: let the EA place trades on detected setups
+input ENUM_IFVG_ENTRY InpEntryMode       = ENTRY_LIMIT_RETEST; // How to enter: limit at the retest, or market right now
+input int    InpMarketFreshBars          = 1;           // MARKET mode: only enter if the setup formed within the last N bars (so it enters NOW, not on old setups)
 input double InpLotSize                  = 0.01;        // Fixed lot size
 input int    InpMagic                    = 880011;      // Magic number (this EA's orders)
 input int    InpMaxPositions             = 3;           // Max concurrent orders+positions (this magic)
-input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled limit after N hours (0 = GTC)
+input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled LIMIT after N hours (0 = GTC; limit mode only)
 input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
 
@@ -127,6 +135,7 @@ double   g_btGrossWin = 0.0;   // sum of +R on winners (for profit factor)
 
 MqlRates g_htf[];              // cached higher-timeframe bars (for as-of-time bias)
 bool     g_tradingHalted = false;  // on-chart STOP button: blocks NEW trades
+datetime g_lastMktBreakTime = 0;   // dedup for market-entry mode (enter each setup once)
 
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
@@ -1038,7 +1047,7 @@ void Dashboard()
    else
      {
       string br = TradeBlockReason();
-      if(br == "") { autoTxt = "ON  lot " + DoubleToString(InpLotSize, 2); autoCol = clrLime; }
+      if(br == "") { autoTxt = "ON " + (InpEntryMode == ENTRY_MARKET_NOW ? "market" : "limit") + " lot " + DoubleToString(InpLotSize, 2); autoCol = clrLime; }
       else         { autoTxt = "BLOCKED: " + br;                          autoCol = clrTomato; }
      }
    SetVal("Auto", autoTxt, autoCol);
@@ -1191,6 +1200,31 @@ void ManageTrades(const IFVGSetup &setups[], int n)
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
+   // ---------- MARKET mode: enter NOW on a freshly-formed setup ----------
+   if(InpEntryMode == ENTRY_MARKET_NOW)
+     {
+      datetime freshAfter = iTime(_Symbol, _Period, MathMax(1, InpMarketFreshBars));   // must have formed within the last N bars
+      for(int i = 0; i < n; i++)
+        {
+         if(setups[i].tested) continue;
+         if(setups[i].bullish  && !InpTradeBuys)  continue;
+         if(!setups[i].bullish && !InpTradeSells) continue;
+         if(setups[i].breakTime < freshAfter)      continue;   // not "happening now" -> skip (don't chase old setups)
+         if(setups[i].breakTime <= g_lastMktBreakTime) continue; // already market-entered this setup
+         if(CountMyOrders() >= InpMaxPositions)    break;
+
+         double sl = NormalizeDouble(setups[i].sl, _Digits);
+         double tp = NormalizeDouble(setups[i].tp, _Digits);
+         bool ok;
+         if(setups[i].bullish) ok = g_trade.Buy (InpLotSize, _Symbol, ask, sl, tp, "IFVG buy mkt");
+         else                  ok = g_trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "IFVG sell mkt");
+         if(ok) g_lastMktBreakTime = setups[i].breakTime;       // enter each setup once
+         break;                                                 // one market entry per pass
+        }
+      return;
+     }
+
+   // ---------- LIMIT mode: rest a pending limit at the entry edge ----------
    for(int i = 0; i < n; i++)
      {
       if(CountMyOrders() >= InpMaxPositions) break;
