@@ -33,7 +33,7 @@ input double InpLookbackHours            = 120.0;       // How far back to scan 
 input int    InpSwingBars                = 5;           // Bars each side to confirm a swing pivot (sweeps / MSS / TP)
 input int    InpATRPeriod                = 14;          // ATR period (sizes the min gap & SL buffer)
 input double InpMinGapATR                = 0.20;        // Minimum FVG size, as a multiple of ATR
-input int    InpMaxSetups                = 6;           // Max IFVG setups to draw (most recent first)
+input int    InpMaxSetups                = 25;          // Max IFVG zones to draw (most recent first)
 
 input group "=== Confluences (filters) ==="
 input bool   InpUseHTFBias               = true;        // Require setup to align with HTF trend
@@ -1064,7 +1064,10 @@ void Scan()
   {
    MqlRates r[];
    ArraySetAsSeries(r, true);                  // index 0 = newest
-   int want = HoursToBars(InpLookbackHours);
+   // Scan as far back as the backtest window so PAST IFVG zones are drawn too,
+   // not just the last few days -- the drawn zones then match what's evaluated.
+   int want = MathMax(HoursToBars(InpLookbackHours),
+                      (int)MathRound(InpBacktestDays * 24.0 * 3600.0 / PeriodSeconds(_Period)));
    int total = CopyRates(_Symbol, _Period, 1, want, r);   // from 1 = closed bars only
    if(total < 2 * InpSwingBars + 10)
       return;
