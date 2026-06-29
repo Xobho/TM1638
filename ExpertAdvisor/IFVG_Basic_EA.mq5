@@ -40,6 +40,7 @@ input bool   InpUseHTFBias               = true;        // Require setup to alig
 input bool   InpUseLiquiditySweep        = true;        // Require a liquidity sweep right before the inversion
 input bool   InpUseMSS                   = true;        // Require the break candle to shift structure
 input int    InpSweepLookback            = 24;          // Bars before the gap to look for the swept pool
+input int    InpSweepSwingBars           = 8;           // Swing strength a SWEPT pool must have (bigger = only real/major liquidity, not minor wiggles; set = External value to require a drawn BSL/SSL)
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
@@ -119,9 +120,10 @@ struct IFVGSetup
    int      breakIdx;      // its bar index (for the outcome walk-forward)
    double   breakLevel;    // the gap edge that was closed through
    bool     hadSweep;
-   datetime sweepTime;
-   double   sweepLevel;
-   double   sweepExtreme;
+   datetime sweepTime;        // the swept pool's swing bar
+   double   sweepLevel;       // the pool price that got taken
+   double   sweepExtreme;     // the wick that took it
+   datetime sweepBreakTime;   // the candle that did the sweeping
    bool     hadMSS;
    datetime mssTime;
    double   mssLevel;
@@ -300,9 +302,9 @@ void ComputeHTFBias()                               // current bias, for the das
 //| then closed back below, between that high and the break candle.   |
 //+------------------------------------------------------------------+
 bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
-                datetime &swTime, double &swLevel, double &swExtreme)
+                datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
   {
-   int k    = InpSwingBars;
+   int k    = InpSweepSwingBars;                   // must be a SIGNIFICANT pool, not any minor swing
    int last = MathMin(total - k - 1, m + InpSweepLookback);
    for(int i = m; i <= last; i++)                  // pools just before the gap, nearest first
      {
@@ -311,14 +313,14 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
          double level = r[i].high;
          for(int j = i - 1; j >= brk; j--)         // newer candles up to the break
             if(r[j].high > level && r[j].close < level)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; return true; }
+              { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; return true; }
         }
       if(!bearish && IsSwingLow(r, i, k))
         {
          double level = r[i].low;
          for(int j = i - 1; j >= brk; j--)
             if(r[j].low < level && r[j].close > level)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; return true; }
+              { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; return true; }
         }
      }
    return false;
@@ -430,8 +432,8 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups)
          bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
          if(InpUseMSS && !hadMSS) continue;
 
-         datetime swTime = 0; double swLevel = 0, swExtreme = 0;
-         bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme);
+         datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
+         bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
          if(InpUseLiquiditySweep && !hadSweep) continue;
 
          // De-duplicate overlapping same-direction zones.
@@ -446,7 +448,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups)
          s.valid = true; s.bullish = !bearish;
          s.gapLow = gapLow; s.gapHigh = gapHigh; s.gapTime = r[m + 1].time;
          s.breakTime = r[brk].time; s.breakIdx = brk; s.breakLevel = bearish ? gapLow : gapHigh;
-         s.hadSweep = hadSweep; s.sweepTime = swTime; s.sweepLevel = swLevel; s.sweepExtreme = swExtreme;
+         s.hadSweep = hadSweep; s.sweepTime = swTime; s.sweepLevel = swLevel; s.sweepExtreme = swExtreme; s.sweepBreakTime = swBreak;
          s.hadMSS = hadMSS; s.mssTime = mssTime; s.mssLevel = mssLevel;
 
          s.tested = false;
@@ -550,13 +552,17 @@ void DrawSetup(const IFVGSetup &s, int idx)
    if(s.hadMSS)
       TextAt(base + "MSS", s.mssTime, s.mssLevel, "MSS ", clrGray, s.bullish ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
 
-   // The liquidity sweep that fed it.
+   // The liquidity sweep that fed it: a line at the POOL level (the liquidity
+   // that got taken) from the pool to the sweep candle, an arrow on the wick
+   // that took it, and a label naming the side.
    if(s.hadSweep)
      {
-      ArrowAt(base + "Swp", s.sweepTime, s.sweepExtreme, 159, InpSweepColor,
+      datetime swEnd = (s.sweepBreakTime > s.sweepTime) ? s.sweepBreakTime : s.breakTime;
+      HLine(base + "SwpL", s.sweepTime, swEnd, s.sweepLevel, InpSweepColor, STYLE_DASH, 1);
+      ArrowAt(base + "Swp", s.sweepBreakTime, s.sweepExtreme, 159, InpSweepColor,
               s.bullish ? ANCHOR_TOP : ANCHOR_BOTTOM);
-      TextAt(base + "SwpT", s.sweepTime, s.sweepExtreme, s.bullish ? "Swept low " : "Swept high ",
-             InpSweepColor, s.bullish ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+      TextAt(base + "SwpT", s.sweepTime, s.sweepLevel, s.bullish ? "swept SSL " : "swept BSL ",
+             InpSweepColor, s.bullish ? ANCHOR_RIGHT_UPPER : ANCHOR_RIGHT_LOWER);
      }
   }
 
