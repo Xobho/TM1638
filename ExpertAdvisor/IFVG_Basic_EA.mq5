@@ -59,7 +59,7 @@ input color  InpTPColor                  = clrGreen;
 input color  InpSweepColor               = clrMagenta;
 input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
-input int    InpStructSwingBars          = 4;           // Swing strength for market structure / MSS / HTF trend (smaller = more swings, matches a finer hand-marked structure)
+input int    InpStructSwingBars          = 4;           // Swing strength for the M15 structure + MSS confluence (smaller = more swings, matches a finer hand-marked structure)
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
