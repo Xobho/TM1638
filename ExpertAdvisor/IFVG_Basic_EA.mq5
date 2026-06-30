@@ -1188,8 +1188,9 @@ void RunBacktest()
 string TradeBlockReason()
   {
    if(g_tradingHalted)                                          return "stopped (Stop button)";
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED))                  return "no connection";
-   if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))        return "Algo button OFF (toolbar)";
+   bool inTester = (bool)MQLInfoInteger(MQL_TESTER);
+   if(!inTester && !TerminalInfoInteger(TERMINAL_CONNECTED))      return "no connection";
+   if(!inTester && !(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return "Algo button OFF (toolbar)";
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))                        return "EA 'Allow Algo Trading' off";
    if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))          return "account trading off";
    ENUM_SYMBOL_TRADE_MODE tm = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
