@@ -102,6 +102,7 @@ input double InpLotSize                  = 0.01;        // Fixed lot size
 input int    InpMagic                    = 880011;      // Magic number (this EA's orders)
 input int    InpMaxPositions             = 3;           // Max concurrent orders+positions (this magic)
 input double InpMaxEntryDistATR          = 4.0;         // Don't rest a limit (and cancel ones) farther than this x ATR from price (0 = no cap) -- keeps far setups from hogging slots
+input int    InpMaxSpreadPoints          = 50;          // Skip entries when spread (points) is wider than this (0 = no cap)
 input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled LIMIT after N hours (0 = GTC; limit mode only)
 input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
@@ -1054,7 +1055,8 @@ void Dashboard()
    else
      {
       string br = TradeBlockReason();
-      if(br == "") { autoTxt = "ON " + (InpEntryMode == ENTRY_MARKET_NOW ? "market" : "limit") + " lot " + DoubleToString(InpLotSize, 2); autoCol = clrLime; }
+      if(br == "") { autoTxt = "ON " + (InpEntryMode == ENTRY_MARKET_NOW ? "market" : "limit") + " lot " + DoubleToString(InpLotSize, 2)
+                               + (SpreadOK() ? "" : "  (spread>max)"); autoCol = SpreadOK() ? clrLime : clrOrange; }
       else         { autoTxt = "BLOCKED: " + br;                          autoCol = clrTomato; }
      }
    SetVal("Auto", autoTxt, autoCol);
@@ -1153,6 +1155,30 @@ bool TradingAllowed()
    return InpAutoTrade && TradeBlockReason() == "";
   }
 
+// Spread guard: skip entries when the spread is abnormally wide.
+bool SpreadOK()
+  {
+   if(InpMaxSpreadPoints <= 0) return true;
+   return (long)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= InpMaxSpreadPoints;
+  }
+
+// Broker minimum distance for SL/TP/pending price (the bigger of stops & freeze level).
+double BrokerStopDist()
+  {
+   double s = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL)  * _Point;
+   double f = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+   return MathMax(s, f);
+  }
+
+// Are SL/TP far enough from a buy/sell at price `px` to be accepted?
+bool StopsOK(bool isBuy, double px, double sl, double tp)
+  {
+   double d = BrokerStopDist();
+   if(d <= 0) return true;
+   if(isBuy)  return (px - sl >= d) && (tp - px >= d);
+   return            (sl - px >= d) && (px - tp >= d);
+  }
+
 // Cancel this EA's UNFILLED pending limits (open positions are left alone).
 void CancelMyPendings()
   {
@@ -1212,6 +1238,7 @@ void TryMarketEntry()
    if(g_liveBull  && !InpTradeBuys)       return;
    if(!g_liveBull && !InpTradeSells)      return;
    if(CountMyOrders() >= InpMaxPositions) return;
+   if(!SpreadOK())                        return;     // spread too wide -> don't market in
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -1221,6 +1248,9 @@ void TryMarketEntry()
    bool touched = g_liveBull ? (ask <= g_liveEntry)   // price dropped into support edge
                              : (bid >= g_liveEntry);   // price rallied into resistance edge
    if(!touched) return;
+
+   double fill = g_liveBull ? ask : bid;
+   if(!StopsOK(g_liveBull, fill, sl, tp)) return;     // SL/TP too close for the broker -> skip
 
    bool ok = g_liveBull ? g_trade.Buy (InpLotSize, _Symbol, ask, sl, tp, "IFVG buy mkt")
                         : g_trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "IFVG sell mkt");
@@ -1262,9 +1292,15 @@ void ManageTrades(const IFVGSetup &setups[], int n)
       double tp    = NormalizeDouble(setups[i].tp,    _Digits);
 
       if(MathAbs(entry - mid) > maxDist) continue;          // too far away -> don't rest a limit yet
+      if(!SpreadOK()) break;                                // spread too wide right now -> skip this pass
       // A limit only makes sense on the correct side of current price.
       if(setups[i].bullish) { if(entry >= ask) continue; }  // BUY LIMIT must sit below the ask
       else                  { if(entry <= bid) continue; }  // SELL LIMIT must sit above the bid
+      // Broker min-distance: pending must sit far enough from market, SL/TP far enough from entry.
+      double sLvl = BrokerStopDist();
+      if(setups[i].bullish) { if(ask - entry < sLvl) continue; }
+      else                  { if(entry - bid < sLvl) continue; }
+      if(!StopsOK(setups[i].bullish, entry, sl, tp)) continue;
       if(HasOrderNear(entry)) continue;                     // already have one on this zone
 
       ENUM_ORDER_TYPE_TIME tt = (InpPendingExpiryHrs > 0) ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
