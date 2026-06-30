@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.30"
+#property version   "1.31"
 #property description "Inversion FVG scanner + auto-trade, M15 scalp mode, R:R gate, live dashboard"
 
 #include <Trade\Trade.mqh>
@@ -448,15 +448,21 @@ bool CheckMSS(const MqlRates &r[], int total, bool bearish, int brk, int m,
   }
 
 //+------------------------------------------------------------------+
-//| Step 6: next draw on liquidity beyond entry (nearest swing).      |
+//| Step 6: next draw on liquidity beyond entry. We target the nearest |
+//| swing that is STILL UNTAPPED -- a level price has not already      |
+//| traded through is real resting liquidity to draw to; a swing that  |
+//| was since swept is spent and makes a poor target. Falls back (via  |
+//| the caller's RR target) when no untapped pool exists ahead.        |
 //+------------------------------------------------------------------+
 bool FindLiquidityTarget(const MqlRates &r[], int total, bool forLong, double entry, double &tp)
   {
    int k = InpSwingBars;
    for(int i = k; i < total - k; i++)
      {
-      if(forLong  && IsSwingHigh(r, i, k) && r[i].high > entry) { tp = r[i].high; return true; }
-      if(!forLong && IsSwingLow(r, i, k)  && r[i].low  < entry) { tp = r[i].low;  return true; }
+      if(forLong  && IsSwingHigh(r, i, k) && r[i].high > entry && UntappedHigh(r, i, r[i].high))
+        { tp = r[i].high; return true; }
+      if(!forLong && IsSwingLow(r, i, k)  && r[i].low  < entry && UntappedLow(r, i, r[i].low))
+        { tp = r[i].low;  return true; }
      }
    return false;
   }
