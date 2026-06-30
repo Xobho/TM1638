@@ -1283,7 +1283,10 @@ void ManageTrades(const IFVGSetup &setups[], int n)
    for(int i = 0; i < n; i++)
      {
       if(CountMyOrders() >= InpMaxPositions) break;
-      if(setups[i].tested) continue;                       // zone already retested -> chance gone
+      // NOTE: do NOT skip "tested" zones -- a fast retest can flag the setup
+      // tested before the next bar-close scan ever places the order. As long
+      // as the entry is still on the correct side of price (checked below), a
+      // resting limit will catch the (next) retest.
       if(setups[i].bullish  && !InpTradeBuys)  continue;
       if(!setups[i].bullish && !InpTradeSells) continue;
 
@@ -1410,12 +1413,12 @@ void Scan()
    double askP = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    for(int i = 0; i < n; i++)
      {
-      if(setups[i].tested) continue;
+      // entry still reachable on the correct side -> still tradable (tested or not)
       bool ahead = setups[i].bullish ? (setups[i].entry < askP) : (setups[i].entry > bidP);
       if(!ahead) continue;
       g_liveValid = true; g_liveWaiting = true;
       g_liveBull = setups[i].bullish; g_liveEntry = setups[i].entry;
-      g_liveTested = false; g_liveTime = setups[i].breakTime;
+      g_liveTested = setups[i].tested; g_liveTime = setups[i].breakTime;
       g_liveSL = setups[i].sl; g_liveTP = setups[i].tp;
       break;
      }
