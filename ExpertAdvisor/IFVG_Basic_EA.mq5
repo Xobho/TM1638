@@ -152,6 +152,10 @@ datetime g_lastMktBreakTime = 0;   // dedup for market-entry mode (enter each se
 double   g_dayPL     = 0.0;        // today's realized P/L (cached, for the daily loss limit)
 int      g_dayTrades = 0;          // trades opened today (cached, for the daily trade cap)
 
+// why the freshest IFVG candidate (gap + confirmed inversion) was/ wasn't taken
+string   g_rejBuy  = "";
+string   g_rejSell = "";
+
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
   {
@@ -415,12 +419,23 @@ bool FindLiquidityTarget(const MqlRates &r[], int total, bool forLong, double en
    return false;
   }
 
+// Record the reason the freshest IFVG candidate per direction was rejected
+// (only the newest one per side, for the diagnostic).
+void RecReject(bool diag, bool bearish, string reason)
+  {
+   if(!diag) return;
+   if(bearish) { if(g_rejSell == "") g_rejSell = reason; }
+   else        { if(g_rejBuy  == "") g_rejBuy  = reason; }
+  }
+
 //+------------------------------------------------------------------+
 //| Core: scan the window for inverted FVGs (most recent first).      |
+//| diag=true records WHY the freshest candidate was/wasn't taken.    |
 //+------------------------------------------------------------------+
-int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups)
+int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, bool diag=false)
   {
    ArrayResize(out, 0);
+   if(diag) { g_rejBuy = ""; g_rejSell = ""; }
    double atr = GetATR();
    if(atr <= 0.0)
       return 0;
@@ -468,23 +483,27 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups)
            }
          if(failed) continue;
 
+         // --- this is now a real IFVG candidate (valid gap + confirmed inversion) ---
+
          // Step 1: HTF bias filter -- judged AS OF this setup's break, so an
          // older setup is filtered by its own day's trend, not today's.
          if(InpUseHTFBias)
            {
             bool bUp, bDown; HTFBiasAt(r[brk].time, bUp, bDown);
-            if(bearish  && !bDown) continue;
-            if(!bearish && !bUp)   continue;
+            if(bearish  && !bDown) { RecReject(diag, bearish, "HTF bias"); continue; }
+            if(!bearish && !bUp)   { RecReject(diag, bearish, "HTF bias"); continue; }
            }
 
          // Confluences.
          datetime mssTime = 0; double mssLevel = 0;
          bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
-         if(InpUseMSS && !hadMSS) continue;
+         if(InpUseMSS && !hadMSS) { RecReject(diag, bearish, "no MSS"); continue; }
 
          datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
          bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
-         if(InpUseLiquiditySweep && !hadSweep) continue;
+         if(InpUseLiquiditySweep && !hadSweep) { RecReject(diag, bearish, "no sweep"); continue; }
+
+         RecReject(diag, bearish, "ok");        // passed all confluences
 
          // De-duplicate overlapping same-direction zones.
          bool dup = false;
@@ -964,11 +983,11 @@ void Dashboard()
    int x = 8, yTop = 16, panelW = 312, headerH = 22, rowH = 16;
    int keyX = x + 8, valX = x + 124, contentY = yTop + headerH + 5;
 
-   string sfx[]   = {"Sym","Bias","Mkt","Filt","Set","SecBT","WL","WR","Net","OpenT","SecAcc","Eq","Pos","PL","Auto","Live"};
-   string left[]  = {"Symbol","HTF bias","Spread/ATR","Filters","Setups","--- BACKTEST ---",
+   string sfx[]   = {"Sym","Bias","Mkt","Filt","Set","Diag","SecBT","WL","WR","Net","OpenT","SecAcc","Eq","Pos","PL","Auto","Live"};
+   string left[]  = {"Symbol","HTF bias","Spread/ATR","Filters","Setups","Last IFVG","--- BACKTEST ---",
                      "Win / Loss","Win rate","Net / PF","Open / no-fill","--- ACCOUNT ---",
                      "Equity / Bal","Pos / Pend","Float P/L","Auto-trade","Live setup"};
-   bool   isSec[] = {false,false,false,false,false,true,false,false,false,false,true,false,false,false,false,false};
+   bool   isSec[] = {false,false,false,false,false,false,true,false,false,false,false,true,false,false,false,false,false};
    int    nrows   = ArraySize(sfx);
 
    int btnH = 22, btnY = contentY + nrows * rowH + 4;
@@ -1024,6 +1043,9 @@ void Dashboard()
    if(fl == "") fl = "none";
    SetVal("Filt", fl, clrAqua);
    SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
+   string rb = (g_rejBuy == "" ? "-" : g_rejBuy), rs = (g_rejSell == "" ? "-" : g_rejSell);
+   color  dc = (g_rejBuy == "ok" || g_rejSell == "ok") ? clrLime : clrSilver;
+   SetVal("Diag", "buy:" + rb + "  sell:" + rs, dc);
 
    if(InpShowBacktest)
      {
@@ -1526,7 +1548,7 @@ void Scan()
    DrawStructure(total);
 
    IFVGSetup setups[];
-   int n = FindIFVGs(r, total, setups, InpMaxSetups);
+   int n = FindIFVGs(r, total, setups, InpMaxSetups, true);   // diag=true -> record reject reasons
    g_lastBull = 0; g_lastBear = 0;
    for(int i = 0; i < n; i++)
      {
