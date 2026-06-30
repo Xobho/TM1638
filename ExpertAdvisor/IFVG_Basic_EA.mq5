@@ -1053,9 +1053,10 @@ void Dashboard()
    if(fl == "") fl = "none";
    SetVal("Filt", fl, clrAqua);
    SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
-   string rb = (g_rejBuy == "" ? "-" : g_rejBuy), rs = (g_rejSell == "" ? "-" : g_rejSell);
+   string rb = (g_rejBuy  == "" ? "none" : (g_rejBuy  == "ok" ? "ok" : "rej(" + g_rejBuy  + ")"));
+   string rs = (g_rejSell == "" ? "none" : (g_rejSell == "ok" ? "ok" : "rej(" + g_rejSell + ")"));
    color  dc = (g_rejBuy == "ok" || g_rejSell == "ok") ? clrLime : clrSilver;
-   SetVal("Diag", "buy:" + rb + "  sell:" + rs, dc);
+   SetVal("Diag", "buy " + rb + "  sell " + rs, dc);
 
    if(InpShowBacktest)
      {
