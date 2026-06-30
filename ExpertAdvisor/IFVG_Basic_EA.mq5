@@ -108,6 +108,14 @@ input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
 input bool   InpAdaptTP                   = true;        // Re-target TP to the next liquidity as new swings form (pending + open positions; SL stays fixed)
 
+input group "=== Risk & management ==="
+input double InpRiskPercent              = 0.5;         // Risk % of balance per trade (lot auto-sized from SL distance; 0 = use fixed lot)
+input bool   InpBreakEven                = true;        // Move SL to break-even once the trade is in profit
+input double InpBETriggerR               = 1.0;         // Break-even trigger, in R (profit / initial risk)
+input int    InpBEBufferPoints           = 5;           // Break-even offset beyond entry, in points (covers spread)
+input int    InpMaxTradesPerDay          = 5;           // Stop opening new trades after this many today (0 = no cap)
+input double InpDailyLossLimitPct        = 3.0;         // Stop opening new trades after today's realized loss reaches this % of balance (0 = off)
+
 //=== Globals =========================================================
 #define PFX  "IFVGB_"
 #define DPFX "IFVGB_DASH_"
@@ -140,6 +148,8 @@ double   g_btGrossWin = 0.0;   // sum of +R on winners (for profit factor)
 MqlRates g_htf[];              // cached higher-timeframe bars (for as-of-time bias)
 bool     g_tradingHalted = false;  // on-chart STOP button: blocks NEW trades
 datetime g_lastMktBreakTime = 0;   // dedup for market-entry mode (enter each setup once)
+double   g_dayPL     = 0.0;        // today's realized P/L (cached, for the daily loss limit)
+int      g_dayTrades = 0;          // trades opened today (cached, for the daily trade cap)
 
 //--- one detected inversion-FVG setup --------------------------------
 struct IFVGSetup
@@ -203,6 +213,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
   {
+   RefreshDailyStats();       // keep the daily P/L & trade-count cache current
    if(InpShowDashboard)
      {
       Dashboard();
@@ -233,6 +244,7 @@ void OnTick()
    // Market-on-retest is checked EVERY tick so it fires the instant price
    // touches the entry edge (not only on bar close).
    TryMarketEntry();
+   ApplyBreakEven();          // manage open trades every tick (move SL to BE at +R)
 
    datetime t = iTime(_Symbol, _Period, 0);
    if(t == g_lastBar)
@@ -1147,6 +1159,7 @@ string TradeBlockReason()
    ENUM_SYMBOL_TRADE_MODE tm = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
    if(tm == SYMBOL_TRADE_MODE_DISABLED)                          return "symbol disabled";
    if(tm == SYMBOL_TRADE_MODE_CLOSEONLY)                         return "symbol close-only (mkt closed?)";
+   if(!DailyLimitsOK())                                          return "daily limit hit";
    return "";
   }
 
@@ -1177,6 +1190,102 @@ bool StopsOK(bool isBuy, double px, double sl, double tp)
    if(d <= 0) return true;
    if(isBuy)  return (px - sl >= d) && (tp - px >= d);
    return            (sl - px >= d) && (px - tp >= d);
+  }
+
+//----------------------------------------------------------------------
+// Risk & management helpers
+//----------------------------------------------------------------------
+// Lot sized to risk InpRiskPercent of balance over the SL distance.
+double LotForTrade(double entry, double sl)
+  {
+   if(InpRiskPercent <= 0) return InpLotSize;
+   double slDist = MathAbs(entry - sl);
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSz  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(slDist <= 0 || tickVal <= 0 || tickSz <= 0) return InpLotSize;
+
+   double riskMoney  = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+   double lossPerLot = (slDist / tickSz) * tickVal;          // loss for 1.0 lot if SL hit
+   if(lossPerLot <= 0) return InpLotSize;
+   double lot = riskMoney / lossPerLot;
+
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step > 0) lot = MathFloor(lot / step) * step;
+   lot = MathMax(minL, MathMin(maxL, lot));
+   return lot;
+  }
+
+datetime DayStart()
+  {
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   return StructToTime(dt);
+  }
+
+// Refresh today's realized P/L and trade count (cached for cheap gating).
+void RefreshDailyStats()
+  {
+   g_dayPL = 0.0; g_dayTrades = 0;
+   if(!HistorySelect(DayStart(), TimeCurrent() + 60)) return;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+     {
+      ulong tk = HistoryDealGetTicket(i);
+      if(tk == 0) continue;
+      if(HistoryDealGetString(tk, DEAL_SYMBOL) != _Symbol) continue;
+      if((long)HistoryDealGetInteger(tk, DEAL_MAGIC) != InpMagic) continue;
+      long entry = HistoryDealGetInteger(tk, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN) g_dayTrades++;
+      if(entry == DEAL_ENTRY_OUT)
+         g_dayPL += HistoryDealGetDouble(tk, DEAL_PROFIT)
+                  + HistoryDealGetDouble(tk, DEAL_SWAP)
+                  + HistoryDealGetDouble(tk, DEAL_COMMISSION);
+     }
+  }
+
+// Cheap (uses cached stats): are we still under the daily caps?
+bool DailyLimitsOK()
+  {
+   if(InpMaxTradesPerDay > 0 && g_dayTrades >= InpMaxTradesPerDay) return false;
+   if(InpDailyLossLimitPct > 0)
+     {
+      double lim = AccountInfoDouble(ACCOUNT_BALANCE) * InpDailyLossLimitPct / 100.0;
+      if(g_dayPL <= -lim) return false;
+     }
+   return true;
+  }
+
+// Break-even: move SL to entry (+buffer) once a position reaches the trigger R.
+void ApplyBreakEven()
+  {
+   if(!InpBreakEven) return;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double buf = InpBEBufferPoints * _Point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+
+      bool   isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+
+      bool atBE = isBuy ? (sl >= entry - _Point) : (sl <= entry + _Point);
+      if(atBE) continue;                                  // already moved to BE/better
+      double R = MathAbs(entry - sl);
+      if(R <= 0) continue;
+      double prof = isBuy ? (bid - entry) : (entry - ask);
+      if(prof < R * InpBETriggerR) continue;              // not far enough in profit yet
+
+      double newSL = isBuy ? entry + buf : entry - buf;
+      g_trade.PositionModify(tk, NormalizeDouble(newSL, _Digits), tp);
+     }
   }
 
 // Cancel this EA's UNFILLED pending limits (open positions are left alone).
@@ -1252,8 +1361,9 @@ void TryMarketEntry()
    double fill = g_liveBull ? ask : bid;
    if(!StopsOK(g_liveBull, fill, sl, tp)) return;     // SL/TP too close for the broker -> skip
 
-   bool ok = g_liveBull ? g_trade.Buy (InpLotSize, _Symbol, ask, sl, tp, "IFVG buy mkt")
-                        : g_trade.Sell(InpLotSize, _Symbol, bid, sl, tp, "IFVG sell mkt");
+   double lot = g_liveBull ? LotForTrade(ask, sl) : LotForTrade(bid, sl);
+   bool ok = g_liveBull ? g_trade.Buy (lot, _Symbol, ask, sl, tp, "IFVG buy mkt")
+                        : g_trade.Sell(lot, _Symbol, bid, sl, tp, "IFVG sell mkt");
    if(ok) g_lastMktBreakTime = g_liveTime;            // enter each setup once
   }
 
@@ -1306,10 +1416,11 @@ void ManageTrades(const IFVGSetup &setups[], int n)
       ENUM_ORDER_TYPE_TIME tt = (InpPendingExpiryHrs > 0) ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
       datetime exp = (InpPendingExpiryHrs > 0) ? TimeCurrent() + (datetime)(InpPendingExpiryHrs * 3600.0) : 0;
 
+      double lot = LotForTrade(entry, sl);
       if(setups[i].bullish)
-         g_trade.BuyLimit(InpLotSize, entry, _Symbol, sl, tp, tt, exp, "IFVG buy");
+         g_trade.BuyLimit(lot, entry, _Symbol, sl, tp, tt, exp, "IFVG buy");
       else
-         g_trade.SellLimit(InpLotSize, entry, _Symbol, sl, tp, tt, exp, "IFVG sell");
+         g_trade.SellLimit(lot, entry, _Symbol, sl, tp, tt, exp, "IFVG sell");
      }
   }
 
@@ -1383,6 +1494,7 @@ void Scan()
 
    EnsureHTFData();      // refresh HTF cache before any bias lookups
    ComputeHTFBias();
+   RefreshDailyStats();  // daily P/L & trade-count for the circuit-breakers
 
    // wipe last pass (setups + structure + liquidity), keep the dashboard
    ObjectsDeleteAll(0, PFX + "S");
