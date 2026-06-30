@@ -48,6 +48,7 @@ input double InpMinRR                    = 2.0;         // Min reward:risk used 
 input double InpSLBufferATR              = 0.10;        // SL buffer beyond the gap extreme (x ATR)
 
 input group "=== Visuals ==="
+input bool   InpShowDrawings              = true;        // Master: draw zones/structure/liquidity on the chart (turn OFF for fast backtests)
 input bool   InpShowStructure            = true;        // Draw swing-pivot market structure (HH/HL/LH/LL)
 input bool   InpShowDashboard            = true;        // Show the on-chart info panel
 input int    InpZoneExtendBars           = 14;          // Bars to extend zone / level lines to the right
@@ -1551,20 +1552,23 @@ void Scan()
    ComputeHTFBias();
    RefreshDailyStats();  // daily P/L & trade-count for the circuit-breakers
 
-   // wipe last pass (setups + structure + liquidity), keep the dashboard
-   ObjectsDeleteAll(0, PFX + "S");
-   ObjectsDeleteAll(0, PFX + "MS_");
-   ObjectsDeleteAll(0, PFX + "LQ_");
-
-   DrawLiquidity(r, total);
-   DrawStructure(total);
+   // Drawing is purely cosmetic -- skip it all when InpShowDrawings is off
+   // (fast backtests). Detection and trading still run below.
+   if(InpShowDrawings)
+     {
+      ObjectsDeleteAll(0, PFX + "S");      // wipe last pass (setups + structure + liquidity)
+      ObjectsDeleteAll(0, PFX + "MS_");
+      ObjectsDeleteAll(0, PFX + "LQ_");
+      DrawLiquidity(r, total);
+      DrawStructure(total);
+     }
 
    IFVGSetup setups[];
    int n = FindIFVGs(r, total, setups, InpMaxSetups, true);   // diag=true -> record reject reasons
    g_lastBull = 0; g_lastBear = 0;
    for(int i = 0; i < n; i++)
      {
-      DrawSetup(setups[i], i);
+      if(InpShowDrawings) DrawSetup(setups[i], i);
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
 
@@ -1596,7 +1600,7 @@ void Scan()
    // Draw the WATCHING level so the monitored point is visible across the chart.
    ObjectDelete(0, PFX + "S_watch");
    ObjectDelete(0, PFX + "S_watchT");
-   if(g_liveWaiting)
+   if(g_liveWaiting && InpShowDrawings)
      {
       ObjectCreate(0, PFX + "S_watch", OBJ_TREND, 0, g_liveTime, g_liveEntry, r[0].time, g_liveEntry);
       ObjectSetInteger(0, PFX + "S_watch", OBJPROP_COLOR, clrYellow);
