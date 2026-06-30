@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.20"
-#property description "Inversion FVG scanner + auto-trade, with M15 scalp mode"
+#property version   "1.30"
+#property description "Inversion FVG scanner + auto-trade, M15 scalp mode, R:R gate, live dashboard"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -50,6 +50,7 @@ input int    InpSweepSwingBars           = 8;           // Swing strength a SWEP
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
+input double InpMinRRFilter              = 1.0;         // QUALITY GATE: skip setups whose target is closer than this R:R (0 = take everything)
 input double InpSLBufferATR              = 0.10;        // SL buffer beyond the gap extreme (x ATR)
 
 input group "=== Visuals ==="
@@ -121,7 +122,7 @@ input double InpRiskPercent              = 0.5;         // Risk % of balance per
 input bool   InpBreakEven                = true;        // Move SL to break-even once the trade is in profit
 input double InpBETriggerR               = 1.0;         // Break-even trigger, in R (profit / initial risk)
 input int    InpBEBufferPoints           = 5;           // Break-even offset beyond entry, in points (covers spread)
-input int    InpMaxTradesPerDay          = 5;           // Stop opening new trades after this many today (0 = no cap)
+input int    InpMaxTradesPerDay          = 8;           // Stop opening new trades after this many today (scalping takes more; 0 = no cap)
 input double InpDailyLossLimitPct        = 3.0;         // Stop opening new trades after today's realized loss reaches this % of balance (0 = off)
 
 //=== Globals =========================================================
@@ -544,8 +545,6 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
          if(InpUseLiquiditySweep && !hadSweep) { RecReject(diag, bearish, "no sweep"); continue; }
 
-         RecReject(diag, bearish, "ok");        // passed all confluences
-
          // De-duplicate overlapping same-direction zones.
          bool dup = false;
          for(int q = 0; q < ArraySize(out); q++)
@@ -582,6 +581,12 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
                            : s.entry + (s.entry - s.sl) * g_minRR;
          double risk = MathAbs(s.entry - s.sl);
          s.rr = (risk > 0) ? MathAbs(s.tp - s.entry) / risk : 0.0;
+
+         // Quality gate: reject setups whose target is too close to be worth it.
+         if(InpMinRRFilter > 0 && s.rr < InpMinRRFilter)
+           { RecReject(diag, bearish, "low R:R"); continue; }
+
+         RecReject(diag, bearish, "ok");        // passed all filters
 
          int sz = ArraySize(out); ArrayResize(out, sz + 1); out[sz] = s;
         }
@@ -1021,14 +1026,24 @@ void Dashboard()
   {
    if(!InpShowDashboard) { ObjectsDeleteAll(0, DPFX); return; }
 
-   int x = 8, yTop = 16, panelW = 312, headerH = 22, rowH = 16;
+   int x = 8, yTop = 16, panelW = 344, headerH = 22, rowH = 16;
    int keyX = x + 8, valX = x + 124, contentY = yTop + headerH + 5;
 
-   string sfx[]   = {"Sym","Bias","Mkt","Filt","Set","Diag","SecBT","WL","WR","Net","OpenT","SecAcc","Eq","Pos","PL","Auto","Live"};
-   string left[]  = {"Symbol","HTF bias","Spread/ATR","Filters","Setups","Last IFVG","--- BACKTEST ---",
-                     "Win / Loss","Win rate","Net / PF","Open / no-fill","--- ACCOUNT ---",
-                     "Equity / Bal","Pos / Pend","Float P/L","Auto-trade","Live setup"};
-   bool   isSec[] = {false,false,false,false,false,false,true,false,false,false,false,true,false,false,false,false,false};
+   string sfx[]   = {"Sym","Mode","Bias","Mkt","Filt","Set","Diag",
+                     "SecBT","WL","WR","Net","OpenT",
+                     "SecAcc","Eq","Pos","PL",
+                     "SecDay","Day","DayTr","Risk",
+                     "Auto","Live"};
+   string left[]  = {"Symbol","Mode","HTF bias","Spread/ATR","Filters","Setups","Last IFVG",
+                     "--- BACKTEST ---","Win / Loss","Win rate","Net / PF","Open / no-fill",
+                     "--- ACCOUNT ---","Equity / Bal","Pos / Pend","Float P/L",
+                     "--- DAILY / RISK ---","Today P/L","Trades today","Risk / lot",
+                     "Auto-trade","Live setup"};
+   bool   isSec[] = {false,false,false,false,false,false,false,
+                     true,false,false,false,false,
+                     true,false,false,false,
+                     true,false,false,false,
+                     false,false};
    int    nrows   = ArraySize(sfx);
 
    int btnH = 22, btnY = contentY + nrows * rowH + 4;
@@ -1078,6 +1093,8 @@ void Dashboard()
    long   spr = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
    SetVal("Sym",  _Symbol + "  " + ShortTF((ENUM_TIMEFRAMES)_Period), clrWhite);
+   SetVal("Mode", (InpScalpMode ? "SCALP (M15 in/out)" : "Positional (HTF)")
+                  + StringFormat("  RR>=%.1f", g_minRR), InpScalpMode ? clrGold : clrAqua);
    SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
    SetVal("Mkt",  IntegerToString((int)spr) + " pts   ATR " + DoubleToString(atr, _Digits), clrSilver);
    string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (InpUseMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
@@ -1109,6 +1126,33 @@ void Dashboard()
    SetVal("Eq",  DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + " / " + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2), clrWhite);
    SetVal("Pos", IntegerToString(pos) + " pos / " + IntegerToString(pend) + " pend", clrWhite);
    SetVal("PL",  DoubleToString(fpl, 2), fpl >= 0 ? clrLime : clrTomato);
+
+   // ---- daily circuit-breakers + per-trade risk (the live safety rails) ----
+   string ccy = AccountInfoString(ACCOUNT_CURRENCY);
+   bool   dayOK = DailyLimitsOK();
+   string dayTxt = DoubleToString(g_dayPL, 2) + " " + ccy;
+   if(InpDailyLossLimitPct > 0)
+     {
+      double lim = AccountInfoDouble(ACCOUNT_BALANCE) * InpDailyLossLimitPct / 100.0;
+      dayTxt += StringFormat("  (limit -%.0f)", lim);
+     }
+   SetVal("Day", dayTxt + (dayOK ? "" : "  HALTED"), g_dayPL > 0 ? clrLime : (g_dayPL < 0 ? clrTomato : clrSilver));
+
+   string trTxt = IntegerToString(g_dayTrades) + (InpMaxTradesPerDay > 0 ? " / " + IntegerToString(InpMaxTradesPerDay) : "");
+   bool   trCap = (InpMaxTradesPerDay > 0 && g_dayTrades >= InpMaxTradesPerDay);
+   SetVal("DayTr", trTxt + (trCap ? "  (cap hit)" : ""), trCap ? clrTomato : clrWhite);
+
+   string riskTxt;
+   if(InpRiskPercent > 0)
+     {
+      double rm = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+      double nlot = (g_liveValid && g_liveSL > 0) ? LotForTrade(g_liveEntry, g_liveSL) : 0.0;
+      riskTxt = StringFormat("%.2f%% = %.2f %s", InpRiskPercent, rm, ccy)
+                + (nlot > 0 ? StringFormat("  ~%.2f lot", nlot) : "");
+     }
+   else
+      riskTxt = StringFormat("fixed %.2f lot", InpLotSize);
+   SetVal("Risk", riskTxt, clrWhite);
 
    // newest setup + how close it is to triggering
    if(!g_liveValid)
