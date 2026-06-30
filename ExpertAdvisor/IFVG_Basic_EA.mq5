@@ -105,6 +105,7 @@ input double InpMaxEntryDistATR          = 4.0;         // Don't rest a limit (a
 input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled LIMIT after N hours (0 = GTC; limit mode only)
 input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
+input bool   InpAdaptTP                   = true;        // Re-target TP to the next liquidity as new swings form (pending + open positions; SL stays fixed)
 
 //=== Globals =========================================================
 #define PFX  "IFVGB_"
@@ -1277,6 +1278,59 @@ void ManageTrades(const IFVGSetup &setups[], int n)
   }
 
 //+------------------------------------------------------------------+
+//| Adaptive TP: re-point the take-profit at the CURRENT next draw on |
+//| liquidity as new swings form -- for our pending limits AND open   |
+//| positions. SL is left untouched. Only modifies when the target    |
+//| actually moved and stays on the correct side of the entry.        |
+//+------------------------------------------------------------------+
+void AdaptTPs(const MqlRates &r[], int total)
+  {
+   if(!InpAdaptTP) return;
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return;     // can't modify if trading isn't permitted
+
+   // pending limit orders
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong tk = OrderGetTicket(i);
+      if(tk == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol || (long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+
+      ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool   isBuy = (ot == ORDER_TYPE_BUY_LIMIT || ot == ORDER_TYPE_BUY_STOP);
+      double entry = OrderGetDouble(ORDER_PRICE_OPEN);
+      double sl    = OrderGetDouble(ORDER_SL);
+      double curTP = OrderGetDouble(ORDER_TP);
+      double tp;
+      if(!FindLiquidityTarget(r, total, isBuy, entry, tp)) continue;
+      tp = NormalizeDouble(tp, _Digits);
+      if(MathAbs(tp - curTP) <= _Point) continue;     // unchanged
+      if((isBuy && tp <= entry) || (!isBuy && tp >= entry)) continue;  // wrong side -> skip
+      g_trade.OrderModify(tk, entry, sl, tp,
+                          (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME),
+                          (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION));
+     }
+
+   // open positions
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+
+      bool   isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double curTP = PositionGetDouble(POSITION_TP);
+      double tp;
+      if(!FindLiquidityTarget(r, total, isBuy, entry, tp)) continue;
+      tp = NormalizeDouble(tp, _Digits);
+      if(MathAbs(tp - curTP) <= _Point) continue;
+      if((isBuy && tp <= entry) || (!isBuy && tp >= entry)) continue;
+      g_trade.PositionModify(tk, sl, tp);
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| One full scan + redraw.                                           |
 //+------------------------------------------------------------------+
 void Scan()
@@ -1354,6 +1408,7 @@ void Scan()
      }
 
    ManageTrades(setups, n);
+   AdaptTPs(r, total);
    RunBacktest();
    Dashboard();
   }
