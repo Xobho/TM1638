@@ -18,13 +18,18 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.10"
-#property description "Inversion FVG scanner + optional pending-limit auto-trade"
+#property version   "1.20"
+#property description "Inversion FVG scanner + auto-trade, with M15 scalp mode"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
 
 //=== Inputs ==========================================================
+input group "=== Scalp mode ==="
+input bool   InpScalpMode                 = true;        // ON: pure M15 in-and-out -- ignores HTF bias, fixed tight target, fast break-even, no TP chasing. Overrides the settings below at startup.
+input double InpScalpRR                    = 1.5;         // Scalp target reward:risk (used when Scalp mode is ON)
+input double InpScalpBETriggerR           = 0.5;         // Scalp break-even trigger, in R (protect early; used when Scalp mode is ON)
+
 input group "=== Timeframe ==="
 input ENUM_TIMEFRAMES InpHTF             = PERIOD_H1;   // Higher timeframe for bias (step 1)
 input int    InpHTFTrendBars             = 6;           // Swing strength for the HTF bias trend (bigger = steadier bias; independent of the M15 structure)
@@ -123,6 +128,14 @@ input double InpDailyLossLimitPct        = 3.0;         // Stop opening new trad
 #define PFX  "IFVGB_"
 #define DPFX "IFVGB_DASH_"
 
+// Effective settings (= inputs, but Scalp mode overrides some at startup).
+// Inputs are read-only consts in MQL5, so the EA reads these instead.
+bool     g_useHTFBias       = true;
+double   g_minRR            = 2.0;
+bool     g_adaptTP          = true;
+double   g_beTriggerR       = 1.0;
+bool     g_cancelCounterBias= true;
+
 int      g_atr        = INVALID_HANDLE;
 datetime g_lastBar    = 0;
 bool     g_htfUp      = true;
@@ -191,6 +204,22 @@ int OnInit()
    g_atr = iATR(_Symbol, _Period, InpATRPeriod);
    if(g_atr == INVALID_HANDLE)
       return INIT_FAILED;
+
+   // Resolve effective settings: Scalp mode overrides a few inputs for a
+   // pure M15 in-and-out style (no HTF bias, tight fixed target, fast BE).
+   g_useHTFBias        = InpUseHTFBias;
+   g_minRR             = InpMinRR;
+   g_adaptTP           = InpAdaptTP;
+   g_beTriggerR        = InpBETriggerR;
+   g_cancelCounterBias = InpCancelCounterBias;
+   if(InpScalpMode)
+     {
+      g_useHTFBias        = false;          // trade both ways off M15 structure alone
+      g_minRR             = InpScalpRR;     // tight, fixed target
+      g_adaptTP           = false;          // take the quick target, don't chase swings
+      g_beTriggerR        = InpScalpBETriggerR; // protect almost immediately
+      g_cancelCounterBias = false;          // no HTF bias to align the book to
+     }
 
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetDeviationInPoints(20);
@@ -499,7 +528,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
 
          // Step 1: HTF bias filter -- judged AS OF this setup's break, so an
          // older setup is filtered by its own day's trend, not today's.
-         if(InpUseHTFBias)
+         if(g_useHTFBias)
            {
             bool bUp, bDown; HTFBiasAt(r[brk].time, bUp, bDown);
             if(bearish  && !bDown) { RecReject(diag, bearish, "HTF bias"); continue; }
@@ -549,8 +578,8 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
             s.tp = tp;
          else
-            s.tp = bearish ? s.entry - (s.sl - s.entry) * InpMinRR
-                           : s.entry + (s.entry - s.sl) * InpMinRR;
+            s.tp = bearish ? s.entry - (s.sl - s.entry) * g_minRR
+                           : s.entry + (s.entry - s.sl) * g_minRR;
          double risk = MathAbs(s.entry - s.sl);
          s.rr = (risk > 0) ? MathAbs(s.tp - s.entry) / risk : 0.0;
 
@@ -1043,15 +1072,15 @@ void Dashboard()
      }
 
    // ---- live values ----
-   string biasTxt = !InpUseHTFBias ? "off" : (g_htfUp && !g_htfDown ? "BULL" : (g_htfDown && !g_htfUp ? "BEAR" : "neutral"));
+   string biasTxt = !g_useHTFBias ? "off" : (g_htfUp && !g_htfDown ? "BULL" : (g_htfDown && !g_htfUp ? "BEAR" : "neutral"));
    color  biasCol = (biasTxt == "BULL") ? clrLime : (biasTxt == "BEAR") ? clrTomato : clrSilver;
    double atr = GetATR();
    long   spr = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
    SetVal("Sym",  _Symbol + "  " + ShortTF((ENUM_TIMEFRAMES)_Period), clrWhite);
-   SetVal("Bias", biasTxt + " (" + ShortTF(InpHTF) + ")", biasCol);
+   SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
    SetVal("Mkt",  IntegerToString((int)spr) + " pts   ATR " + DoubleToString(atr, _Digits), clrSilver);
-   string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (InpUseMSS ? "MSS " : "") + (InpUseHTFBias ? "HTF" : "");
+   string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (InpUseMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
    if(fl == "") fl = "none";
    SetVal("Filt", fl, clrAqua);
    SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
@@ -1318,7 +1347,7 @@ void ApplyBreakEven()
       double R = MathAbs(entry - sl);
       if(R <= 0) continue;
       double prof = isBuy ? (bid - entry) : (entry - ask);
-      if(prof < R * InpBETriggerR) continue;              // not far enough in profit yet
+      if(prof < R * g_beTriggerR) continue;              // not far enough in profit yet
 
       double newSL = isBuy ? entry + buf : entry - buf;
       g_trade.PositionModify(tk, NormalizeDouble(newSL, _Digits), tp);
@@ -1329,7 +1358,7 @@ void ApplyBreakEven()
 // resting book stays trend-aligned and stale counter-trend orders free up slots.
 void CancelCounterBias()
   {
-   if(!InpCancelCounterBias || !InpUseHTFBias) return;
+   if(!g_cancelCounterBias || !g_useHTFBias) return;
    if(g_htfUp == g_htfDown) return;                       // neutral -> leave orders alone
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
 
@@ -1489,7 +1518,7 @@ void ManageTrades(const IFVGSetup &setups[], int n)
 //+------------------------------------------------------------------+
 void AdaptTPs(const MqlRates &r[], int total)
   {
-   if(!InpAdaptTP) return;
+   if(!g_adaptTP) return;
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return;     // can't modify if trading isn't permitted
 
    // pending limit orders
