@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.32"
-#property description "Inversion FVG scanner + auto-trade, M15 scalp mode, R:R gate, ghost (rejected) zones"
+#property version   "1.33"
+#property description "Inversion FVG scanner + auto-trade; sweep-driven IFVG, M15 scalp, ghost zones"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -43,8 +43,8 @@ input int    InpMaxSetups                = 25;          // Max IFVG zones to dra
 
 input group "=== Confluences (filters) ==="
 input bool   InpUseHTFBias               = true;        // Require setup to align with HTF trend
-input bool   InpUseLiquiditySweep        = true;        // Require a liquidity sweep right before the inversion
-input bool   InpUseMSS                   = true;        // Require the break candle to shift structure
+input bool   InpUseLiquiditySweep        = true;        // KEY confluence: require a liquidity sweep right before the inversion (the sweep IS the reversal signal)
+input bool   InpUseMSS                   = false;       // Require the break candle to ALSO shift structure (redundant when a sweep is required; off by default)
 input int    InpSweepLookback            = 24;          // Bars before the gap to look for the swept pool
 input int    InpSweepSwingBars           = 8;           // Swing strength a SWEPT pool must have (bigger = only real/major liquidity, not minor wiggles; set = External value to require a drawn BSL/SSL)
 
@@ -559,16 +559,17 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
               { RecReject(diag, bearish, "HTF bias"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "HTF bias"); continue; }
            }
 
-         // Confluences.
-         datetime mssTime = 0; double mssLevel = 0;
-         bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
-         if(InpUseMSS && !hadMSS)
-           { RecReject(diag, bearish, "no MSS"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no MSS"); continue; }
-
+         // Confluences -- the liquidity sweep is the PRIMARY reversal signal,
+         // so it is checked first; MSS is an optional extra (off by default).
          datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
          bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
          if(InpUseLiquiditySweep && !hadSweep)
            { RecReject(diag, bearish, "no sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no sweep"); continue; }
+
+         datetime mssTime = 0; double mssLevel = 0;
+         bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
+         if(InpUseMSS && !hadMSS)
+           { RecReject(diag, bearish, "no MSS"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no MSS"); continue; }
 
          // De-duplicate overlapping same-direction zones.
          bool dup = false;
