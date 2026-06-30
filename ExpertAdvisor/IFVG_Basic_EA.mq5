@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.31"
-#property description "Inversion FVG scanner + auto-trade, M15 scalp mode, R:R gate, live dashboard"
+#property version   "1.32"
+#property description "Inversion FVG scanner + auto-trade, M15 scalp mode, R:R gate, ghost (rejected) zones"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -55,6 +55,7 @@ input double InpSLBufferATR              = 0.10;        // SL buffer beyond the 
 
 input group "=== Visuals ==="
 input bool   InpShowDrawings              = true;        // Master: draw zones/structure/liquidity on the chart (turn OFF for fast backtests)
+input bool   InpShowRejected             = true;        // Show REJECTED IFVG candidates as faded zones labelled with the reason (no MSS / no sweep / etc.)
 input bool   InpShowStructure            = true;        // Draw swing-pivot market structure (HH/HL/LH/LL)
 input bool   InpShowDashboard            = true;        // Show the on-chart info panel
 input int    InpZoneExtendBars           = 14;          // Bars to extend zone / level lines to the right
@@ -197,7 +198,10 @@ struct IFVGSetup
    double   sl;
    double   tp;
    double   rr;
+   string   rejReason;     // "" if it passed; otherwise why it was filtered (for ghost zones)
   };
+
+IFVGSetup g_ghosts[];      // rejected IFVG candidates (drawn faded, labelled with the reason)
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -476,6 +480,19 @@ void RecReject(bool diag, bool bearish, string reason)
    else        { if(g_rejBuy  == "") g_rejBuy  = reason; }
   }
 
+// Record a rejected IFVG candidate so it can be drawn as a faded "ghost"
+// zone with its reason -- this is what answers "why wasn't this marked?".
+void PushGhost(bool diag, bool bearish, double gapLow, double gapHigh,
+               datetime gapTime, datetime breakTime, string reason)
+  {
+   if(!diag) return;
+   if(ArraySize(g_ghosts) >= 20) return;            // cap (most-recent first), to keep the chart readable
+   IFVGSetup g; ZeroMemory(g);
+   g.bullish = !bearish; g.gapLow = gapLow; g.gapHigh = gapHigh;
+   g.gapTime = gapTime;  g.breakTime = breakTime;   g.rejReason = reason;
+   int sz = ArraySize(g_ghosts); ArrayResize(g_ghosts, sz + 1); g_ghosts[sz] = g;
+  }
+
 //+------------------------------------------------------------------+
 //| Core: scan the window for inverted FVGs (most recent first).      |
 //| diag=true records WHY the freshest candidate was/wasn't taken.    |
@@ -483,7 +500,7 @@ void RecReject(bool diag, bool bearish, string reason)
 int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, bool diag=false)
   {
    ArrayResize(out, 0);
-   if(diag) { g_rejBuy = ""; g_rejSell = ""; }
+   if(diag) { g_rejBuy = ""; g_rejSell = ""; ArrayResize(g_ghosts, 0); }
    double atr = GetATR();
    if(atr <= 0.0)
       return 0;
@@ -538,18 +555,20 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          if(g_useHTFBias)
            {
             bool bUp, bDown; HTFBiasAt(r[brk].time, bUp, bDown);
-            if(bearish  && !bDown) { RecReject(diag, bearish, "HTF bias"); continue; }
-            if(!bearish && !bUp)   { RecReject(diag, bearish, "HTF bias"); continue; }
+            if((bearish && !bDown) || (!bearish && !bUp))
+              { RecReject(diag, bearish, "HTF bias"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "HTF bias"); continue; }
            }
 
          // Confluences.
          datetime mssTime = 0; double mssLevel = 0;
          bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
-         if(InpUseMSS && !hadMSS) { RecReject(diag, bearish, "no MSS"); continue; }
+         if(InpUseMSS && !hadMSS)
+           { RecReject(diag, bearish, "no MSS"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no MSS"); continue; }
 
          datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
          bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
-         if(InpUseLiquiditySweep && !hadSweep) { RecReject(diag, bearish, "no sweep"); continue; }
+         if(InpUseLiquiditySweep && !hadSweep)
+           { RecReject(diag, bearish, "no sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no sweep"); continue; }
 
          // De-duplicate overlapping same-direction zones.
          bool dup = false;
@@ -590,7 +609,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
 
          // Quality gate: reject setups whose target is too close to be worth it.
          if(InpMinRRFilter > 0 && s.rr < InpMinRRFilter)
-           { RecReject(diag, bearish, "low R:R"); continue; }
+           { RecReject(diag, bearish, "low R:R"); PushGhost(diag, bearish, s.gapLow, s.gapHigh, s.gapTime, s.breakTime, "low R:R"); continue; }
 
          RecReject(diag, bearish, "ok");        // passed all filters
 
@@ -684,6 +703,39 @@ void DrawSetup(const IFVGSetup &s, int idx)
               s.bullish ? ANCHOR_TOP : ANCHOR_BOTTOM);
       TextAt(base + "SwpT", s.sweepTime, s.sweepLevel, s.bullish ? "swept SSL " : "swept BSL ",
              InpSweepColor, s.bullish ? ANCHOR_RIGHT_UPPER : ANCHOR_RIGHT_LOWER);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Draw rejected IFVG candidates as faded, hollow "ghost" zones with |
+//| the reason -- so you can SEE the gaps that had a valid inversion  |
+//| but failed a filter (no MSS / no sweep / HTF bias / low R:R), and |
+//| why they weren't marked as tradable setups.                       |
+//+------------------------------------------------------------------+
+void DrawGhosts()
+  {
+   if(!InpShowRejected) return;
+   int n = ArraySize(g_ghosts);
+   for(int i = 0; i < n; i++)
+     {
+      IFVGSetup g = g_ghosts[i];
+      string base = PFX + "G" + IntegerToString(i) + "_";
+      datetime tR = g.breakTime + (datetime)(PeriodSeconds(_Period) * InpZoneExtendBars);
+      if(tR <= g.breakTime) tR = g.breakTime + PeriodSeconds(_Period);
+
+      string z = base + "Zone";
+      if(ObjectFind(0, z) >= 0) ObjectDelete(0, z);
+      if(ObjectCreate(0, z, OBJ_RECTANGLE, 0, g.gapTime, g.gapHigh, tR, g.gapLow))
+        {
+         ObjectSetInteger(0, z, OBJPROP_COLOR, C'90,95,105');   // muted grey, hollow
+         ObjectSetInteger(0, z, OBJPROP_FILL, false);
+         ObjectSetInteger(0, z, OBJPROP_BACK, true);
+         ObjectSetInteger(0, z, OBJPROP_STYLE, STYLE_DOT);
+         ObjectSetInteger(0, z, OBJPROP_SELECTABLE, false);
+        }
+      string tag = (g.bullish ? "buy? " : "sell? ") + g.rejReason;
+      TextAt(base + "Lbl", g.gapTime, g.bullish ? g.gapLow : g.gapHigh, tag, C'120,125,135',
+             g.bullish ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
      }
   }
 
@@ -1639,18 +1691,20 @@ void Scan()
       ObjectsDeleteAll(0, PFX + "S");      // wipe last pass (setups + structure + liquidity)
       ObjectsDeleteAll(0, PFX + "MS_");
       ObjectsDeleteAll(0, PFX + "LQ_");
+      ObjectsDeleteAll(0, PFX + "G");      // ghost (rejected) zones
       DrawLiquidity(r, total);
       DrawStructure(total);
      }
 
    IFVGSetup setups[];
-   int n = FindIFVGs(r, total, setups, InpMaxSetups, true);   // diag=true -> record reject reasons
+   int n = FindIFVGs(r, total, setups, InpMaxSetups, true);   // diag=true -> record reject reasons + ghosts
    g_lastBull = 0; g_lastBear = 0;
    for(int i = 0; i < n; i++)
      {
       if(InpShowDrawings) DrawSetup(setups[i], i);
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
+   if(InpShowDrawings) DrawGhosts();
 
    // The MONITORED setup = the freshest one still WAITING to trigger (untested
    // and with its entry still ahead on the correct side). It adapts: when a
