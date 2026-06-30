@@ -101,6 +101,7 @@ input ENUM_IFVG_ENTRY InpEntryMode       = ENTRY_LIMIT_RETEST; // How to enter a
 input double InpLotSize                  = 0.01;        // Fixed lot size
 input int    InpMagic                    = 880011;      // Magic number (this EA's orders)
 input int    InpMaxPositions             = 3;           // Max concurrent orders+positions (this magic)
+input double InpMaxEntryDistATR          = 4.0;         // Don't rest a limit (and cancel ones) farther than this x ATR from price (0 = no cap) -- keeps far setups from hogging slots
 input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled LIMIT after N hours (0 = GTC; limit mode only)
 input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
@@ -1039,10 +1040,10 @@ void Dashboard()
       int    dpts  = (int)MathRound(MathAbs(g_liveEntry - price) / _Point);
       string dir   = g_liveBull ? "BUY" : "SELL";
       string st; color stc;
-      if(pos > 0)            { st = "FILLED";  stc = clrLime;   }
-      else if(g_liveTested)  { st = "tested";  stc = clrOrange; }
-      else if(pend > 0)      { st = "pending"; stc = clrAqua;   }
-      else                   { st = "waiting"; stc = clrSilver; }
+      if(pos > 0)                       { st = "FILLED";  stc = clrLime;   }
+      else if(g_liveTested)             { st = "tested";  stc = clrOrange; }
+      else if(HasOrderNear(g_liveEntry)){ st = "pending"; stc = clrAqua;   }  // an order on THIS level
+      else                              { st = "waiting"; stc = clrSilver; }
       SetVal("Live", dir + " " + DoubleToString(g_liveEntry, _Digits) + "  " + IntegerToString(dpts) + "pts  " + st, stc);
      }
 
@@ -1232,6 +1233,20 @@ void ManageTrades(const IFVGSetup &setups[], int n)
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double mid = 0.5 * (ask + bid);
+   double atr = GetATR();
+   double maxDist = (InpMaxEntryDistATR > 0 && atr > 0) ? InpMaxEntryDistATR * atr : DBL_MAX;
+
+   // Cancel our pending limits that have drifted TOO FAR from price -- they only
+   // hog the InpMaxPositions slots and block nearer, actionable setups.
+   for(int oi = OrdersTotal() - 1; oi >= 0; oi--)
+     {
+      ulong tk = OrderGetTicket(oi);
+      if(tk == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol || (long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+      if(MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - mid) > maxDist)
+         g_trade.OrderDelete(tk);
+     }
 
    // ---------- LIMIT mode: rest a pending limit at the entry edge ----------
    for(int i = 0; i < n; i++)
@@ -1245,6 +1260,7 @@ void ManageTrades(const IFVGSetup &setups[], int n)
       double sl    = NormalizeDouble(setups[i].sl,    _Digits);
       double tp    = NormalizeDouble(setups[i].tp,    _Digits);
 
+      if(MathAbs(entry - mid) > maxDist) continue;          // too far away -> don't rest a limit yet
       // A limit only makes sense on the correct side of current price.
       if(setups[i].bullish) { if(entry >= ask) continue; }  // BUY LIMIT must sit below the ask
       else                  { if(entry <= bid) continue; }  // SELL LIMIT must sit above the bid
