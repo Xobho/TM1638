@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.36"
+#property version   "1.37"
 #property description "Inversion FVG; sweep-driven, win-probability read, M15 scalp"
 
 #include <Trade\Trade.mqh>
@@ -424,18 +424,23 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
       if(bearish && IsSwingHigh(r, i, k))
         {
          double level = r[i].high;
+         // The swept pool must be REAL overhead liquidity: a high sitting at or
+         // above the sell zone. A swing high below the zone is not the liquidity
+         // this rejection took, so it is not THIS setup's sweep.
+         if(level < gapLow) continue;
          for(int j = i - 1; j >= brk; j--)         // newer candles up to the break
             if(r[j].high > level && r[j].close < level)
               {
-               // The grab must reach the resistance being made (wick above the
-               // zone top) -- otherwise it is unrelated chop, not THIS sweep.
-               if(r[j].high < gapHigh) break;       // this pool's poke is below the zone -> try an older/higher pool
+               // ...and the grab must actually trade above the zone top.
+               if(r[j].high < gapHigh) break;       // poke below the zone -> try an older/higher pool
                swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; return true;
               }
         }
       if(!bearish && IsSwingLow(r, i, k))
         {
          double level = r[i].low;
+         // The swept pool must be real liquidity below: a low at or below the buy zone.
+         if(level > gapHigh) continue;
          for(int j = i - 1; j >= brk; j--)
             if(r[j].low < level && r[j].close > level)
               {
@@ -728,6 +733,7 @@ void DrawSetup(const IFVGSetup &s, int idx)
    double est, need; SetupOdds(s, est, need);
    string tag = (s.bullish ? "IFVG BUY  " : "IFVG SELL ") + "R:R " + DoubleToString(s.rr, 1) +
                 "  win~" + DoubleToString(est, 0) + "% (" + OddsGrade(est, need) + ")" +
+                (s.hadSweep ? "  swept " + DoubleToString(s.sweepLevel, _Digits) : "") +
                 (s.stage == "ready" ? "  [READY]" : "") + (s.tested ? "  (tested)" : "");
    TextAt(base + "Lbl", s.gapTime, s.bullish ? s.gapLow : s.gapHigh, tag, c,
           s.bullish ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
