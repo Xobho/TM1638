@@ -27,6 +27,7 @@ CTrade g_trade;
 //=== Inputs ==========================================================
 input group "=== Timeframe ==="
 input ENUM_TIMEFRAMES InpHTF             = PERIOD_H1;   // Higher timeframe for bias (step 1)
+input int    InpHTFTrendBars             = 6;           // Swing strength for the HTF bias trend (bigger = steadier bias; independent of the M15 structure)
 
 input group "=== Detection ==="
 input double InpLookbackHours            = 120.0;       // How far back to scan (hours)
@@ -320,7 +321,7 @@ void EnsureHTFData()
 int HTFTrendAt(datetime t)
   {
    int n = ArraySize(g_htf);
-   int k = InpStructSwingBars;
+   int k = InpHTFTrendBars;        // independent of the M15 structure strength
    if(n < 2 * k + 5) return 0;
 
    int start = -1;                                  // first HTF bar at/older than t
