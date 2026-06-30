@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.33"
+#property version   "1.34"
 #property description "Inversion FVG scanner + auto-trade; sweep-driven IFVG, M15 scalp, ghost zones"
 
 #include <Trade\Trade.mqh>
@@ -133,6 +133,7 @@ input double InpDailyLossLimitPct        = 3.0;         // Stop opening new trad
 // Effective settings (= inputs, but Scalp mode overrides some at startup).
 // Inputs are read-only consts in MQL5, so the EA reads these instead.
 bool     g_useHTFBias       = true;
+bool     g_useMSS           = false;
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
 double   g_beTriggerR       = 1.0;
@@ -213,6 +214,7 @@ int OnInit()
    // Resolve effective settings: Scalp mode overrides a few inputs for a
    // pure M15 in-and-out style (no HTF bias, tight fixed target, fast BE).
    g_useHTFBias        = InpUseHTFBias;
+   g_useMSS            = InpUseMSS;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
    g_beTriggerR        = InpBETriggerR;
@@ -220,6 +222,7 @@ int OnInit()
    if(InpScalpMode)
      {
       g_useHTFBias        = false;          // trade both ways off M15 structure alone
+      g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
       g_beTriggerR        = InpScalpBETriggerR; // protect almost immediately
@@ -568,7 +571,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
 
          datetime mssTime = 0; double mssLevel = 0;
          bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
-         if(InpUseMSS && !hadMSS)
+         if(g_useMSS && !hadMSS)
            { RecReject(diag, bearish, "no MSS"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no MSS"); continue; }
 
          // De-duplicate overlapping same-direction zones.
@@ -1156,7 +1159,7 @@ void Dashboard()
                   + StringFormat("  RR>=%.1f", g_minRR), InpScalpMode ? clrGold : clrAqua);
    SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
    SetVal("Mkt",  IntegerToString((int)spr) + " pts   ATR " + DoubleToString(atr, _Digits), clrSilver);
-   string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (InpUseMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
+   string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (g_useMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
    if(fl == "") fl = "none";
    SetVal("Filt", fl, clrAqua);
    SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
