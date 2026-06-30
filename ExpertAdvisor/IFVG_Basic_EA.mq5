@@ -311,38 +311,48 @@ void EnsureHTFData()
   }
 
 //+------------------------------------------------------------------+
-//| Step 1: HTF bias AS OF time t -- using only the HTF swings that   |
-//| had formed by then, so a historical setup is judged by its own    |
-//| day's trend, not today's. Neutral (both true) until 2 swings each. |
+//| HTF trend AS OF time t, from the SAME BOS/CHoCH engine as the      |
+//| drawn structure: the trend flips on a structure break and stays    |
+//| there until the opposite break -- so a downtrend reads BEAR right  |
+//| through pullbacks, instead of going neutral on every higher high.  |
+//| Returns 1 (up) / -1 (down) / 0 (undecided).                        |
 //+------------------------------------------------------------------+
-void HTFBiasAt(datetime t, bool &up, bool &down)
+int HTFTrendAt(datetime t)
   {
-   up = true; down = true;
    int n = ArraySize(g_htf);
-   if(n < 4 * InpSwingBars + 4)
-      return;
+   int k = InpStructSwingBars;
+   if(n < 2 * k + 5) return 0;
 
    int start = -1;                                  // first HTF bar at/older than t
    for(int i = 0; i < n; i++)
       if(g_htf[i].time <= t) { start = i; break; }
-   if(start < 0)
-      return;
+   if(start < 0) return 0;
 
-   double hi[2], lo[2]; int hc = 0, lc = 0;
-   for(int i = start + InpSwingBars; i < n - InpSwingBars; i++)   // confirmed-by-t swings, newest first
+   double refHigh = 0, refLow = 0; bool haveH = false, haveL = false;
+   int trend = 0;
+   for(int i = n - k - 1; i >= start; i--)          // oldest -> up to t
      {
-      if(hc >= 2 && lc >= 2) break;
-      if(hc < 2 && IsSwingHigh(g_htf, i, InpSwingBars)) hi[hc++] = g_htf[i].high;
-      if(lc < 2 && IsSwingLow (g_htf, i, InpSwingBars)) lo[lc++] = g_htf[i].low;
+      double c = g_htf[i].close;
+      if(haveH && c > refHigh)      { trend = 1;  haveH = false; }   // break up
+      else if(haveL && c < refLow)  { trend = -1; haveL = false; }   // break down
+      int j = i + k;                                 // swing confirmed once k newer bars exist
+      if(j <= n - 1 - k)
+        {
+         if(IsSwingHigh(g_htf, j, k)) { refHigh = g_htf[j].high; haveH = true; }
+         if(IsSwingLow (g_htf, j, k)) { refLow  = g_htf[j].low;  haveL = true; }
+        }
      }
-   if(hc < 2 || lc < 2)
-      return;
+   return trend;
+  }
 
-   bool hh = hi[0] > hi[1], hl = lo[0] > lo[1];
-   bool lh = hi[0] < hi[1], ll = lo[0] < lo[1];
-   if(hh && hl)      { up = true;  down = false; }
-   else if(lh && ll) { up = false; down = true;  }
-   // mixed -> neutral (both stay true)
+// Step 1: HTF bias AS OF t -- now driven by the structure trend, so it tracks
+// the actual BOS/CHoCH structure (no neutral flicker on pullbacks).
+void HTFBiasAt(datetime t, bool &up, bool &down)
+  {
+   int tr = HTFTrendAt(t);
+   if(tr == 1)       { up = true;  down = false; }
+   else if(tr == -1) { up = false; down = true;  }
+   else              { up = true;  down = true;  }   // undecided -> neutral
   }
 
 void ComputeHTFBias()                               // current bias, for the dashboard display
