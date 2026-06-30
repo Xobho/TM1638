@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.34"
+#property version   "1.35"
 #property description "Inversion FVG scanner + auto-trade; sweep-driven IFVG, M15 scalp, ghost zones"
 
 #include <Trade\Trade.mqh>
@@ -134,6 +134,7 @@ input double InpDailyLossLimitPct        = 3.0;         // Stop opening new trad
 // Inputs are read-only consts in MQL5, so the EA reads these instead.
 bool     g_useHTFBias       = true;
 bool     g_useMSS           = false;
+bool     g_useSweep         = true;
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
 double   g_beTriggerR       = 1.0;
@@ -215,6 +216,7 @@ int OnInit()
    // pure M15 in-and-out style (no HTF bias, tight fixed target, fast BE).
    g_useHTFBias        = InpUseHTFBias;
    g_useMSS            = InpUseMSS;
+   g_useSweep          = InpUseLiquiditySweep;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
    g_beTriggerR        = InpBETriggerR;
@@ -223,6 +225,7 @@ int OnInit()
      {
       g_useHTFBias        = false;          // trade both ways off M15 structure alone
       g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
+      g_useSweep          = true;           // the sweep is THE confluence -- always required here
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
       g_beTriggerR        = InpScalpBETriggerR; // protect almost immediately
@@ -409,7 +412,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
   {
    int k    = InpSweepSwingBars;                   // must be a SIGNIFICANT pool, not any minor swing
    int last = MathMin(total - k - 1, m + InpSweepLookback);
-   for(int i = m; i <= last; i++)                  // pools just before the gap, nearest first
+   for(int i = m + 2; i <= last; i++)              // pools strictly BEFORE the FVG (m+1=oldest gap candle), nearest first
      {
       if(bearish && IsSwingHigh(r, i, k))
         {
@@ -566,7 +569,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // so it is checked first; MSS is an optional extra (off by default).
          datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
          bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
-         if(InpUseLiquiditySweep && !hadSweep)
+         if(g_useSweep && !hadSweep)
            { RecReject(diag, bearish, "no sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no sweep"); continue; }
 
          datetime mssTime = 0; double mssLevel = 0;
@@ -1159,7 +1162,7 @@ void Dashboard()
                   + StringFormat("  RR>=%.1f", g_minRR), InpScalpMode ? clrGold : clrAqua);
    SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
    SetVal("Mkt",  IntegerToString((int)spr) + " pts   ATR " + DoubleToString(atr, _Digits), clrSilver);
-   string fl = (InpUseLiquiditySweep ? "Sweep " : "") + (g_useMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
+   string fl = (g_useSweep ? "Sweep " : "") + (g_useMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
    if(fl == "") fl = "none";
    SetVal("Filt", fl, clrAqua);
    SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
