@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.35"
-#property description "Inversion FVG scanner + auto-trade; sweep-driven IFVG, M15 scalp, ghost zones"
+#property version   "1.36"
+#property description "Inversion FVG; sweep-driven, win-probability read, M15 scalp"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -156,6 +156,8 @@ bool     g_liveWaiting = false;   // monitored one is still waiting to trigger
 datetime g_liveTime    = 0;       // its break-bar anchor (for the watch line)
 double   g_liveSL      = 0.0;     // monitored setup's SL/TP (for market-on-retest entry)
 double   g_liveTP      = 0.0;
+double   g_liveEst     = 0.0;     // monitored setup's estimated win % / break-even need %
+double   g_liveNeed    = 0.0;
 
 // backtest tally (filled by RunBacktest, shown on the dashboard)
 int      g_btWins     = 0;
@@ -200,6 +202,7 @@ struct IFVGSetup
    double   sl;
    double   tp;
    double   rr;
+   bool     tpIsLiquidity; // TP sits at a real untapped pool (a genuine draw) vs an RR fallback
    string   rejReason;     // "" if it passed; otherwise why it was filtered (for ghost zones)
   };
 
@@ -405,9 +408,13 @@ void ComputeHTFBias()                               // current bias, for the das
 //+------------------------------------------------------------------+
 //| Confluence: a liquidity sweep right before the inversion. For a   |
 //| short (bearish) we need a prior swing HIGH that price wicked above |
-//| then closed back below, between that high and the break candle.   |
+//| then closed back below -- AND the grab must happen at/above the    |
+//| zone being created (swExtreme beyond the gap), so a distant or     |
+//| unrelated poke is not credited. Proximity-limited to the bars just |
+//| before the inversion (InpSweepLookback).                           |
 //+------------------------------------------------------------------+
 bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
+                double gapLow, double gapHigh,
                 datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
   {
    int k    = InpSweepSwingBars;                   // must be a SIGNIFICANT pool, not any minor swing
@@ -419,14 +426,22 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
          double level = r[i].high;
          for(int j = i - 1; j >= brk; j--)         // newer candles up to the break
             if(r[j].high > level && r[j].close < level)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; return true; }
+              {
+               // The grab must reach the resistance being made (wick above the
+               // zone top) -- otherwise it is unrelated chop, not THIS sweep.
+               if(r[j].high < gapHigh) break;       // this pool's poke is below the zone -> try an older/higher pool
+               swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; return true;
+              }
         }
       if(!bearish && IsSwingLow(r, i, k))
         {
          double level = r[i].low;
          for(int j = i - 1; j >= brk; j--)
             if(r[j].low < level && r[j].close > level)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; return true; }
+              {
+               if(r[j].low > gapLow) break;         // grab must reach below the support zone
+               swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; return true;
+              }
         }
      }
    return false;
@@ -455,6 +470,33 @@ bool CheckMSS(const MqlRates &r[], int total, bool bearish, int brk, int m,
         }
      }
    return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Rough win-probability for a setup. Two honest numbers:            |
+//|  needPct = the break-even win rate this R:R demands (pure math,   |
+//|            = 100/(1+RR)) -- you must win MORE than this to profit. |
+//|  estPct  = an estimate of the actual win chance: the strategy's   |
+//|            historical win rate (once enough samples) nudged by    |
+//|            whether the TP sits at real untapped liquidity (a true  |
+//|            draw pulls price to target) vs an RR fallback.         |
+//+------------------------------------------------------------------+
+void SetupOdds(const IFVGSetup &s, double &estPct, double &needPct)
+  {
+   needPct = (s.rr > 0) ? 100.0 / (1.0 + s.rr) : 100.0;
+   int    tot  = g_btWins + g_btLosses;
+   double base = (tot >= 10) ? (100.0 * g_btWins / tot) : 50.0;  // empirical edge once we have data
+   double factor = s.tpIsLiquidity ? 1.10 : 0.85;                // real draw vs no clear target
+   estPct = MathMax(5.0, MathMin(95.0, base * factor));
+  }
+
+string OddsGrade(double estPct, double needPct)
+  {
+   double edge = estPct - needPct;                  // estimated win% over the break-even it needs
+   if(edge >= 15) return "A";
+   if(edge >= 5)  return "B";
+   if(edge >= 0)  return "C";
+   return "avoid";
   }
 
 //+------------------------------------------------------------------+
@@ -568,7 +610,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // Confluences -- the liquidity sweep is the PRIMARY reversal signal,
          // so it is checked first; MSS is an optional extra (off by default).
          datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
-         bool hadSweep = CheckSweep(r, total, bearish, m, brk, swTime, swLevel, swExtreme, swBreak);
+         bool hadSweep = CheckSweep(r, total, bearish, m, brk, gapLow, gapHigh, swTime, swLevel, swExtreme, swBreak);
          if(g_useSweep && !hadSweep)
            { RecReject(diag, bearish, "no sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no sweep"); continue; }
 
@@ -607,10 +649,13 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          s.sl    = bearish ? gapHigh + buf : gapLow - buf;
          double tp;
          if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
-            s.tp = tp;
+           { s.tp = tp; s.tpIsLiquidity = true; }
          else
+           {
             s.tp = bearish ? s.entry - (s.sl - s.entry) * g_minRR
                            : s.entry + (s.entry - s.sl) * g_minRR;
+            s.tpIsLiquidity = false;
+           }
          double risk = MathAbs(s.entry - s.sl);
          s.rr = (risk > 0) ? MathAbs(s.tp - s.entry) / risk : 0.0;
 
@@ -680,7 +725,9 @@ void DrawSetup(const IFVGSetup &s, int idx)
       ObjectSetInteger(0, z, OBJPROP_SELECTABLE, false);
      }
 
+   double est, need; SetupOdds(s, est, need);
    string tag = (s.bullish ? "IFVG BUY  " : "IFVG SELL ") + "R:R " + DoubleToString(s.rr, 1) +
+                "  win~" + DoubleToString(est, 0) + "% (" + OddsGrade(est, need) + ")" +
                 (s.stage == "ready" ? "  [READY]" : "") + (s.tested ? "  (tested)" : "");
    TextAt(base + "Lbl", s.gapTime, s.bullish ? s.gapLow : s.gapHigh, tag, c,
           s.bullish ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
@@ -1098,17 +1145,17 @@ void Dashboard()
                      "SecBT","WL","WR","Net","OpenT",
                      "SecAcc","Eq","Pos","PL",
                      "SecDay","Day","DayTr","Risk",
-                     "Auto","Live"};
+                     "Auto","Live","Odds"};
    string left[]  = {"Symbol","Mode","HTF bias","Spread/ATR","Filters","Setups","Last IFVG",
                      "--- BACKTEST ---","Win / Loss","Win rate","Net / PF","Open / no-fill",
                      "--- ACCOUNT ---","Equity / Bal","Pos / Pend","Float P/L",
                      "--- DAILY / RISK ---","Today P/L","Trades today","Risk / lot",
-                     "Auto-trade","Live setup"};
+                     "Auto-trade","Live setup","Win odds"};
    bool   isSec[] = {false,false,false,false,false,false,false,
                      true,false,false,false,false,
                      true,false,false,false,
                      true,false,false,false,
-                     false,false};
+                     false,false,false};
    int    nrows   = ArraySize(sfx);
 
    int btnH = 22, btnY = contentY + nrows * rowH + 4;
@@ -1233,6 +1280,17 @@ void Dashboard()
       else if(HasOrderNear(g_liveEntry)){ st = "pending"; stc = clrAqua;   }  // an order on THIS level
       else                              { st = "waiting"; stc = clrSilver; }
       SetVal("Live", dir + " " + DoubleToString(g_liveEntry, _Digits) + "  " + IntegerToString(dpts) + "pts  " + st, stc);
+     }
+
+   // win-probability for the monitored setup: estimate vs the break-even it needs
+   if(!g_liveValid)
+      SetVal("Odds", "-", clrSilver);
+   else
+     {
+      string grade = OddsGrade(g_liveEst, g_liveNeed);
+      color  oc = (grade == "A") ? clrLime : (grade == "B") ? clrYellowGreen
+                 : (grade == "C") ? clrGold : clrTomato;
+      SetVal("Odds", StringFormat("win~%.0f%%  need %.0f%%  [%s]", g_liveEst, g_liveNeed, grade), oc);
      }
 
    string autoTxt; color autoCol;
@@ -1729,6 +1787,7 @@ void Scan()
       g_liveBull = setups[i].bullish; g_liveEntry = setups[i].entry;
       g_liveTested = false; g_liveTime = setups[i].breakTime;
       g_liveSL = setups[i].sl; g_liveTP = setups[i].tp;
+      SetupOdds(setups[i], g_liveEst, g_liveNeed);
       break;
      }
    if(!g_liveValid && n > 0)
@@ -1736,6 +1795,7 @@ void Scan()
       g_liveValid = true; g_liveBull = setups[0].bullish; g_liveEntry = setups[0].entry;
       g_liveTested = setups[0].tested; g_liveTime = setups[0].breakTime;
       g_liveSL = setups[0].sl; g_liveTP = setups[0].tp;
+      SetupOdds(setups[0], g_liveEst, g_liveNeed);
      }
 
    // Draw the WATCHING level so the monitored point is visible across the chart.
