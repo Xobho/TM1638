@@ -107,6 +107,7 @@ input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled LI
 input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
 input bool   InpAdaptTP                   = true;        // Re-target TP to the next liquidity as new swings form (pending + open positions; SL stays fixed)
+input bool   InpCancelCounterBias         = true;        // Cancel pending orders that oppose the current HTF bias (keeps the book trend-aligned, frees slots)
 
 input group "=== Risk & management ==="
 input double InpRiskPercent              = 0.5;         // Risk % of balance per trade (lot auto-sized from SL distance; 0 = use fixed lot)
@@ -1288,6 +1289,26 @@ void ApplyBreakEven()
      }
   }
 
+// Cancel pending orders whose direction opposes the CURRENT HTF bias, so the
+// resting book stays trend-aligned and stale counter-trend orders free up slots.
+void CancelCounterBias()
+  {
+   if(!InpCancelCounterBias || !InpUseHTFBias) return;
+   if(g_htfUp == g_htfDown) return;                       // neutral -> leave orders alone
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
+
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong tk = OrderGetTicket(i);
+      if(tk == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol || (long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+      ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool isBuy = (ot == ORDER_TYPE_BUY_LIMIT || ot == ORDER_TYPE_BUY_STOP);
+      if(g_htfDown && isBuy)  g_trade.OrderDelete(tk);     // bear bias -> drop resting buys
+      if(g_htfUp   && !isBuy) g_trade.OrderDelete(tk);     // bull bias -> drop resting sells
+     }
+  }
+
 // Cancel this EA's UNFILLED pending limits (open positions are left alone).
 void CancelMyPendings()
   {
@@ -1555,6 +1576,7 @@ void Scan()
              clrYellow, ANCHOR_RIGHT_LOWER);
      }
 
+   CancelCounterBias();
    ManageTrades(setups, n);
    AdaptTPs(r, total);
    RunBacktest();
