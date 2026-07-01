@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.52"
+#property version   "1.53"
 #property description "Inversion FVG; sweep = a Major level taken out"
 
 #include <Trade\Trade.mqh>
@@ -78,6 +78,7 @@ input color  InpBOSColor                 = clrGray;     // Break of Structure (c
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
 input double InpMajorMoveATR             = 2.5;         // MAJOR level = a swing after price reversed >= this x ATR (significance; auto-scales per TF; bigger = fewer, only the biggest). 0 = use bar-count strength
+input int    InpMajorPivotBars           = 4;           // A major pivot must also be a real fractal swing (this many lower/higher bars each side); bigger = only clean swings
 input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
 input double InpMajorDays                 = 10.0;        // Draw major levels going back at least this many days
 input int    InpMaxMajorLines            = 4;           // (legacy) max major lines per side -- ignored; the days window governs
@@ -1014,14 +1015,17 @@ void ComputeMajorPivots(const MqlRates &rr[], int total, double atr,
          if(rr[i].low  < curLo) { curLo = rr[i].low;  curLoIdx = i; }
          if(dir != -1 && rr[i].low <= curHi - thresh)
            {
-            int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
-            pIdx[s]=curHiIdx; pPx[s]=curHi; pHi[s]=true;
+            // record only if the leg's peak is a real fractal swing high
+            if(IsSwingHigh(rr, curHiIdx, InpMajorPivotBars))
+              { int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
+                pIdx[s]=curHiIdx; pPx[s]=curHi; pHi[s]=true; }
             dir = -1; curLo = rr[i].low; curLoIdx = i;
            }
          else if(dir != 1 && rr[i].high >= curLo + thresh)
            {
-            int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
-            pIdx[s]=curLoIdx; pPx[s]=curLo; pHi[s]=false;
+            if(IsSwingLow(rr, curLoIdx, InpMajorPivotBars))
+              { int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
+                pIdx[s]=curLoIdx; pPx[s]=curLo; pHi[s]=false; }
             dir = 1; curHi = rr[i].high; curHiIdx = i;
            }
         }
