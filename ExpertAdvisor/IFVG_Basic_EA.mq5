@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.48"
-#property description "Inversion FVG; structure & liquidity adapt to the chart TF"
+#property version   "1.49"
+#property description "Inversion FVG; adaptive structure, decluttered BOS/CHoCH"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -73,6 +73,7 @@ input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
 input int    InpStructSwingBars          = 4;           // Swing strength for the M15 structure + MSS confluence (smaller = more swings, matches a finer hand-marked structure)
 input bool   InpShowSwingLabels          = false;       // Show the small HH/HL/LH/LL pivot text labels (off = cleaner chart; BOS/CHoCH + major levels still drawn)
+input int    InpMaxStructBreaks          = 6;           // Draw only the most recent N BOS/CHoCH breaks (keeps low timeframes clean; 0 = all)
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
@@ -910,6 +911,10 @@ void DrawStructureTF(ENUM_TIMEFRAMES tf, color hiCol, color loCol, string tag, i
    int      trend = 0;                    // 1 up, -1 down, 0 none
    double   prevSH = 0, prevSL = 0;       bool havePrevSH = false, havePrevSL = false;
 
+   // collect break events, then draw only the most recent N (declutters low TFs)
+   datetime brT1[]; datetime brT2[]; double brPx[]; bool brBOS[];
+   ArrayResize(brT1,0); ArrayResize(brT2,0); ArrayResize(brPx,0); ArrayResize(brBOS,0);
+
    for(int i = total - k - 1; i >= 0; i--)        // oldest -> newest
      {
       double c = rr[i].close;
@@ -918,15 +923,15 @@ void DrawStructureTF(ENUM_TIMEFRAMES tf, color hiCol, color loCol, string tag, i
       if(haveRefHigh && c > refHigh)
         {
          bool isBOS = (trend != -1);              // up-break: BOS unless we were bearish
-         DrawStructBreak(tag, refHighT, rr[i].time, refHigh, tag + (isBOS ? "BOS" : "CHoCH"),
-                         isBOS ? InpBOSColor : InpCHoCHColor);
+         int s=ArraySize(brT1); ArrayResize(brT1,s+1);ArrayResize(brT2,s+1);ArrayResize(brPx,s+1);ArrayResize(brBOS,s+1);
+         brT1[s]=refHighT; brT2[s]=rr[i].time; brPx[s]=refHigh; brBOS[s]=isBOS;
          trend = 1; haveRefHigh = false;
         }
       else if(haveRefLow && c < refLow)
         {
          bool isBOS = (trend != 1);               // down-break: BOS unless we were bullish
-         DrawStructBreak(tag, refLowT, rr[i].time, refLow, tag + (isBOS ? "BOS" : "CHoCH"),
-                         isBOS ? InpBOSColor : InpCHoCHColor);
+         int s=ArraySize(brT1); ArrayResize(brT1,s+1);ArrayResize(brT2,s+1);ArrayResize(brPx,s+1);ArrayResize(brBOS,s+1);
+         brT1[s]=refLowT; brT2[s]=rr[i].time; brPx[s]=refLow; brBOS[s]=isBOS;
          trend = -1; haveRefLow = false;
         }
 
@@ -957,9 +962,14 @@ void DrawStructureTF(ENUM_TIMEFRAMES tf, color hiCol, color loCol, string tag, i
            }
         }
      }
-  }
 
-// HTF bar count covering the same time span as `fromBars` of the current TF.
+   // draw only the most recent N breaks (0 = all)
+   int nb = ArraySize(brT1);
+   int from = (InpMaxStructBreaks > 0) ? MathMax(0, nb - InpMaxStructBreaks) : 0;
+   for(int b = from; b < nb; b++)
+      DrawStructBreak(tag, brT1[b], brT2[b], brPx[b], tag + (brBOS[b] ? "BOS" : "CHoCH"),
+                      brBOS[b] ? InpBOSColor : InpCHoCHColor);
+  }
 int MTFBars(ENUM_TIMEFRAMES tf, int fromBars)
   {
    double span = (double)fromBars * PeriodSeconds(_Period);
