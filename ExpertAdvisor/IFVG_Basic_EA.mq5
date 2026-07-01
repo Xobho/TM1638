@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.50"
-#property description "Inversion FVG; major levels over a days window, adaptive structure"
+#property version   "1.51"
+#property description "Inversion FVG; sweep = a Major level taken out"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -218,6 +218,13 @@ struct IFVGSetup
   };
 
 IFVGSetup g_ghosts[];      // rejected IFVG candidates (drawn faded, labelled with the reason)
+
+// Major structure pivots for the current scan (the drawn Major HH/HL/LH/LL).
+// The sweep looks for one of THESE being taken out -- the lines you see ARE
+// the liquidity. Filled once per scan, indexed into the scan's rates array.
+int    g_majIdx[];
+double g_majPx[];
+bool   g_majHi[];
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -458,54 +465,48 @@ int CountLiquidityTouches(const MqlRates &r[], int total, double level, bool isH
   }
 
 //+------------------------------------------------------------------+
-//| Confluence: a liquidity sweep before the inversion. The swept pool |
-//| is prior RESTING liquidity (an untapped swing high/low): the FIRST |
-//| time price trades up to it, it must poke through and CLOSE back    |
-//| the other side (a grab + rejection). If price instead closes       |
-//| through it, the pool is spent, not swept.                          |
-//| We return the MOST SIGNIFICANT swept pool -- the HIGHEST swept high |
-//| (or LOWEST swept low) in the window -- because a real sweep takes  |
-//| out the EXTREME liquidity (the range/major high), not a minor high  |
-//| just above the zone. The pool may be far back (a major high taken   |
-//| out much later), so the search spans g_sweepLookback bars.         |
+//| Confluence: a liquidity sweep before the inversion -- defined as a  |
+//| MAJOR structure level (a drawn Major HH/HL/LH/LL, from g_maj*)     |
+//| being TAKEN OUT: price trades through the level the FIRST time and  |
+//| CLOSES back the other side (grab + rejection), reaching the zone.   |
+//| If price closes through it, the level is broken, not swept.        |
+//| Returns the most significant swept level (highest high / lowest    |
+//| low). So: the lines you see ARE the liquidity, and taking one is    |
+//| the sweep that arms the IFVG.                                       |
 //+------------------------------------------------------------------+
 bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
                 double gapLow, double gapHigh,
                 datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
   {
-   int    k    = g_sweepSwingBars;                 // must be a SIGNIFICANT pool, not any minor swing
-   int    last = MathMin(total - k - 1, m + g_sweepLookback);
-   double tol  = InpSweepTouchTolATR * GetATR();   // how near a swing must be to count as a touch
-   bool   found = false;
-   for(int i = m + 2; i <= last; i++)              // pools before the FVG
+   int  np = ArraySize(g_majPx);
+   bool found = false;
+   for(int p = 0; p < np; p++)
      {
-      if(bearish && IsSwingHigh(r, i, k))
+      int idx = g_majIdx[p];
+      if(idx <= brk + 1) continue;                 // the major must sit before the inversion
+      if(bearish && g_majHi[p])                    // a Major HIGH taken out = sell-side sweep
         {
-         double level = r[i].high;
-         if(level < gapLow) continue;              // must be REAL overhead liquidity (at/above the zone)
-         if(found && level <= swLevel) continue;   // already have a HIGHER swept pool -> skip lesser highs
-         for(int j = i - 1; j >= brk; j--)         // walk forward to the FIRST time the pool is reached
+         double level = g_majPx[p];
+         if(level < gapLow) continue;              // real overhead liquidity (at/above the zone)
+         if(found && level <= swLevel) continue;   // keep the HIGHEST swept high
+         for(int j = idx - 1; j >= brk; j--)       // first time price returns to the level
            {
-            if(r[j].high <= level) continue;       // pool not reached yet -> still resting
-            // First touch: a sweep only if it closes back below AND reached the zone,
-            // AND the level is real clustered liquidity (tapped by >= min inner swings).
-            if(r[j].close < level && r[j].high >= gapHigh &&
-               CountLiquidityTouches(r, total, level, true, tol, brk, last) >= InpSweepMinTouches)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
-            break;                                 // pool broken/spent here
+            if(r[j].high <= level) continue;       // not reached yet -> still resting
+            if(r[j].close < level && r[j].high >= gapHigh)   // grabbed + rejected + reached zone
+              { swTime = r[idx].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
+            break;                                 // level broken/spent here
            }
         }
-      if(!bearish && IsSwingLow(r, i, k))
+      else if(!bearish && !g_majHi[p])             // a Major LOW taken out = buy-side sweep
         {
-         double level = r[i].low;
+         double level = g_majPx[p];
          if(level > gapHigh) continue;             // real liquidity below (at/below the zone)
-         if(found && level >= swLevel) continue;   // already have a LOWER swept pool
-         for(int j = i - 1; j >= brk; j--)
+         if(found && level >= swLevel) continue;   // keep the LOWEST swept low
+         for(int j = idx - 1; j >= brk; j--)
            {
-            if(r[j].low >= level) continue;        // pool not reached yet
-            if(r[j].close > level && r[j].low <= gapLow &&
-               CountLiquidityTouches(r, total, level, false, tol, brk, last) >= InpSweepMinTouches)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
+            if(r[j].low >= level) continue;
+            if(r[j].close > level && r[j].low <= gapLow)
+              { swTime = r[idx].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
             break;
            }
         }
@@ -620,6 +621,10 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
       return 0;
    double minGap = InpMinGapATR  * atr;
    double buf    = InpSLBufferATR * atr;
+
+   // Major structure pivots for this window = the liquidity the sweep hunts for
+   // (same detector as the drawn Major lines, so they match).
+   ComputeMajorPivots(r, total, AtrFromRates(r, total, InpATRPeriod), g_majIdx, g_majPx, g_majHi);
 
    for(int m = 1; m < total - 1; m++)
      {
@@ -988,37 +993,31 @@ int MTFBars(ENUM_TIMEFRAMES tf, int fromBars)
 //| HH/HL/LH/LL and drawn as level lines ending at first contact.      |
 //| Falls back to bar-count strength when InpMajorMoveATR = 0.         |
 //+------------------------------------------------------------------+
-void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
+// Shared major-pivot detector (used by both the drawing and the sweep, so the
+// swept levels are exactly the Major lines you see). ATR-scaled zigzag: a swing
+// confirms once price reverses >= InpMajorMoveATR*ATR. Pivots are chronological.
+void ComputeMajorPivots(const MqlRates &rr[], int total, double atr,
+                        int &pIdx[], double &pPx[], bool &pHi[])
   {
-   if(!InpShowMajorStruct) return;
-   MqlRates rr[];
-   ArraySetAsSeries(rr, true);
-   int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
-   if(total < 10) return;
-   datetime tNow = iTime(_Symbol, _Period, 0);          // extend lines to the current chart bar
-
-   // ---- collect the major pivots (chronological: oldest first) ----
-   int    pIdx[];  double pPx[];  bool pHi[];
    ArrayResize(pIdx, 0); ArrayResize(pPx, 0); ArrayResize(pHi, 0);
-
-   double atr = AtrFromRates(rr, total, InpATRPeriod);  // ATR of the MAJOR TF (adapts per TF)
+   if(total < 10) return;
    if(InpMajorMoveATR > 0.0 && atr > 0.0)
      {
-      double thresh = InpMajorMoveATR * atr;             // ATR-scaled reversal (adapts per TF)
+      double thresh = InpMajorMoveATR * atr;
       double curHi = rr[total - 1].high; int curHiIdx = total - 1;
       double curLo = rr[total - 1].low;  int curLoIdx = total - 1;
-      int    dir   = 0;                                  // +1 up-leg, -1 down-leg
+      int    dir   = 0;
       for(int i = total - 2; i >= 0; i--)                // oldest -> newest
         {
          if(rr[i].high > curHi) { curHi = rr[i].high; curHiIdx = i; }
          if(rr[i].low  < curLo) { curLo = rr[i].low;  curLoIdx = i; }
-         if(dir != -1 && rr[i].low <= curHi - thresh)    // reversed down off the high
+         if(dir != -1 && rr[i].low <= curHi - thresh)
            {
             int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
             pIdx[s]=curHiIdx; pPx[s]=curHi; pHi[s]=true;
             dir = -1; curLo = rr[i].low; curLoIdx = i;
            }
-         else if(dir != 1 && rr[i].high >= curLo + thresh)  // reversed up off the low
+         else if(dir != 1 && rr[i].high >= curLo + thresh)
            {
             int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
             pIdx[s]=curLoIdx; pPx[s]=curLo; pHi[s]=false;
@@ -1030,7 +1029,7 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
      {
       int k = InpMajorSwingBars;
       if(total < 2 * k + 5) return;
-      for(int i = total - k - 1; i >= k; i--)            // oldest -> newest
+      for(int i = total - k - 1; i >= k; i--)
         {
          if(IsSwingHigh(rr, i, k))
            { int s=ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
@@ -1040,6 +1039,19 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
              pIdx[s]=i; pPx[s]=rr[i].low; pHi[s]=false; }
         }
      }
+  }
+
+void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
+  {
+   if(!InpShowMajorStruct) return;
+   MqlRates rr[];
+   ArraySetAsSeries(rr, true);
+   int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
+   if(total < 10) return;
+   datetime tNow = iTime(_Symbol, _Period, 0);          // extend lines to the current chart bar
+
+   int    pIdx[];  double pPx[];  bool pHi[];
+   ComputeMajorPivots(rr, total, AtrFromRates(rr, total, InpATRPeriod), pIdx, pPx, pHi);
 
    int np = ArraySize(pIdx);
    if(np == 0) return;
