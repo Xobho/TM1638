@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.45"
-#property description "Inversion FVG; ATR-significance major structure, M15 scalp"
+#property version   "1.46"
+#property description "Inversion FVG; HTF major structure overlay, M15 scalp"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -57,7 +57,7 @@ input bool   InpBuyEntrySpreadAdj        = true;        // Lift BUY entry by the
 
 input group "=== Visuals ==="
 input bool   InpShowDrawings              = true;        // Master: draw zones/structure/liquidity on the chart (turn OFF for fast backtests)
-input bool   InpShowRejected             = true;        // Show REJECTED IFVG candidates as faded zones labelled with the reason (no MSS / no sweep / etc.)
+input bool   InpShowRejected             = false;       // Show REJECTED IFVG candidates as faded 'ghost' zones (diagnostic; off = cleaner chart)
 input bool   InpShowStructure            = true;        // Draw swing-pivot market structure (HH/HL/LH/LL)
 input bool   InpShowDashboard            = true;        // Show the on-chart info panel
 input int    InpZoneExtendBars           = 14;          // Bars to extend zone / level lines to the right
@@ -74,7 +74,8 @@ input bool   InpShowSwingLabels          = false;       // Show the small HH/HL/
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
-input double InpMajorMoveATR             = 1.5;         // MAJOR level = a swing after price moved >= this x ATR (significance-based; auto-scales per timeframe). 0 = use bar-count strength instead
+input ENUM_TIMEFRAMES InpMajorTF         = PERIOD_M15;  // Timeframe the MAJOR structure is read from (e.g. keep M15 while you execute on M5). PERIOD_CURRENT = chart TF
+input double InpMajorMoveATR             = 2.5;         // MAJOR level = a swing after price reversed >= this x ATR (significance; auto-scales per TF; bigger = fewer, only the biggest). 0 = use bar-count strength
 input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
 input int    InpMaxMajorLines            = 4;           // Max major lines per side
 input color  InpMajorStructColor         = clrBlue;     // Major-structure level color
@@ -322,6 +323,24 @@ double GetATR()
    if(CopyBuffer(g_atr, 0, 0, 1, b) > 0 && b[0] > 0.0)
       return b[0];
    return 0.0;
+  }
+
+// ATR from a series-indexed rates array (so it works for ANY timeframe we
+// have already copied, without a per-TF indicator handle).
+double AtrFromRates(const MqlRates &r[], int total, int period)
+  {
+   if(total < 3) return 0.0;
+   int n = MathMin(period, total - 1);
+   if(n < 1) return 0.0;
+   double sum = 0.0;
+   for(int i = 0; i < n; i++)
+     {
+      double tr = MathMax(r[i].high - r[i].low,
+                  MathMax(MathAbs(r[i].high - r[i + 1].close),
+                          MathAbs(r[i].low  - r[i + 1].close)));
+      sum += tr;
+     }
+   return sum / n;
   }
 
 bool IsSwingHigh(const MqlRates &r[], int i, int k)
@@ -941,13 +960,13 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
    ArraySetAsSeries(rr, true);
    int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
    if(total < 10) return;
-   datetime tNow = rr[0].time;
+   datetime tNow = iTime(_Symbol, _Period, 0);          // extend lines to the current chart bar
 
    // ---- collect the major pivots (chronological: oldest first) ----
    int    pIdx[];  double pPx[];  bool pHi[];
    ArrayResize(pIdx, 0); ArrayResize(pPx, 0); ArrayResize(pHi, 0);
 
-   double atr = GetATR();
+   double atr = AtrFromRates(rr, total, InpATRPeriod);  // ATR of the MAJOR TF (adapts per TF)
    if(InpMajorMoveATR > 0.0 && atr > 0.0)
      {
       double thresh = InpMajorMoveATR * atr;             // ATR-scaled reversal (adapts per TF)
@@ -1030,7 +1049,11 @@ void DrawStructure(int total)
   {
    if(!InpShowStructure) return;
    DrawStructureTF(_Period, InpStructHighColor, InpStructLowColor, "", total);
-   DrawMajorStructure(_Period, total);
+   // Major structure from a FIXED timeframe (e.g. M15) so it stays the same
+   // reference when you drop to M5 to execute. PERIOD_CURRENT = chart TF.
+   ENUM_TIMEFRAMES majTF = (InpMajorTF == PERIOD_CURRENT) ? (ENUM_TIMEFRAMES)_Period : InpMajorTF;
+   int majBars = (majTF == (ENUM_TIMEFRAMES)_Period) ? total : (int)MathMax(MTFBars(majTF, total), 250.0);
+   DrawMajorStructure(majTF, majBars);
    if(InpMTFStructure)
      {
       DrawStructureTF(InpStructTF2, InpStructTF2Color, InpStructTF2Color, ShortTF(InpStructTF2) + " ", MTFBars(InpStructTF2, total));
