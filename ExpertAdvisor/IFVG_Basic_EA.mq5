@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.39"
+#property version   "1.40"
 #property description "Inversion FVG; sweep-driven, spread-aware levels, M15 scalp"
 
 #include <Trade\Trade.mqh>
@@ -53,6 +53,7 @@ input double InpMinRR                    = 2.0;         // Min reward:risk used 
 input double InpMinRRFilter              = 1.0;         // QUALITY GATE: skip setups whose target is closer than this R:R (0 = take everything)
 input double InpSLBufferATR              = 0.10;        // SL buffer beyond the gap extreme (x ATR)
 input bool   InpSpreadAdjust             = true;        // Shift SELL SL/TP up by the live spread so they align to the chart (sells exit on Ask); avoids being stopped a spread early
+input bool   InpBuyEntrySpreadAdj        = true;        // Lift BUY entry by the live spread so the buy fills when the Bid chart touches the zone top (buys fill at Ask); avoids missing thin retests
 
 input group "=== Visuals ==="
 input bool   InpShowDrawings              = true;        // Master: draw zones/structure/liquidity on the chart (turn OFF for fast backtests)
@@ -652,7 +653,12 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // retest: the BOTTOM of the zone for a sell (price rallies up into
          // resistance), the TOP for a buy (price drops into support).
          // SL beyond the far extreme; TP at the next liquidity.
+         double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
          s.entry = bearish ? gapLow : gapHigh;
+         // A BUY fills at Ask, so lift its entry by the spread to fill the instant
+         // the Bid chart touches the zone top (a sell fills at Bid -> no change).
+         if(InpBuyEntrySpreadAdj && !bearish)
+            s.entry += spread;
          s.sl    = bearish ? gapHigh + buf : gapLow - buf;
          double tp;
          if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
@@ -670,7 +676,6 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // exits on Bid already, so its SL/TP need no adjustment.
          if(InpSpreadAdjust && bearish)
            {
-            double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
             s.sl += spread;
             s.tp += spread;
            }
