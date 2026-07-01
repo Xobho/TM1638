@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.51"
+#property version   "1.52"
 #property description "Inversion FVG; sweep = a Major level taken out"
 
 #include <Trade\Trade.mqh>
@@ -134,6 +134,7 @@ input double InpBETriggerR               = 1.0;         // Break-even trigger, i
 input int    InpBEBufferPoints           = 5;           // Break-even offset beyond entry, in points (covers spread)
 input int    InpMaxTradesPerDay          = 8;           // Stop opening new trades after this many today (scalping takes more; 0 = no cap)
 input double InpDailyLossLimitPct        = 3.0;         // Stop opening new trades after today's realized loss reaches this % of balance (0 = off)
+input double InpDailyLossLimitUSD        = 5.0;         // Stop new trades after today's realized loss reaches this in account currency (overrides the % when > 0; 0 = off)
 
 //=== Globals =========================================================
 #define PFX  "IFVGB_"
@@ -1419,11 +1420,8 @@ void Dashboard()
    string ccy = AccountInfoString(ACCOUNT_CURRENCY);
    bool   dayOK = DailyLimitsOK();
    string dayTxt = DoubleToString(g_dayPL, 2) + " " + ccy;
-   if(InpDailyLossLimitPct > 0)
-     {
-      double lim = AccountInfoDouble(ACCOUNT_BALANCE) * InpDailyLossLimitPct / 100.0;
-      dayTxt += StringFormat("  (limit -%.0f)", lim);
-     }
+   double dlim = DailyLossLimit();
+   if(dlim > 0) dayTxt += StringFormat("  (limit -%.2f)", dlim);
    SetVal("Day", dayTxt + (dayOK ? "" : "  HALTED"), g_dayPL > 0 ? clrLime : (g_dayPL < 0 ? clrTomato : clrSilver));
 
    string trTxt = IntegerToString(g_dayTrades) + (InpMaxTradesPerDay > 0 ? " / " + IntegerToString(InpMaxTradesPerDay) : "");
@@ -1672,15 +1670,21 @@ void RefreshDailyStats()
      }
   }
 
+// Effective daily loss limit in account currency (USD input overrides the %).
+// 0 = no loss limit in force.
+double DailyLossLimit()
+  {
+   if(InpDailyLossLimitUSD > 0) return InpDailyLossLimitUSD;
+   if(InpDailyLossLimitPct > 0) return AccountInfoDouble(ACCOUNT_BALANCE) * InpDailyLossLimitPct / 100.0;
+   return 0.0;
+  }
+
 // Cheap (uses cached stats): are we still under the daily caps?
 bool DailyLimitsOK()
   {
    if(InpMaxTradesPerDay > 0 && g_dayTrades >= InpMaxTradesPerDay) return false;
-   if(InpDailyLossLimitPct > 0)
-     {
-      double lim = AccountInfoDouble(ACCOUNT_BALANCE) * InpDailyLossLimitPct / 100.0;
-      if(g_dayPL <= -lim) return false;
-     }
+   double lim = DailyLossLimit();
+   if(lim > 0 && g_dayPL <= -lim) return false;
    return true;
   }
 
