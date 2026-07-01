@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.44"
-#property description "Inversion FVG; sweep-driven, spread-aware levels, M15 scalp"
+#property version   "1.45"
+#property description "Inversion FVG; ATR-significance major structure, M15 scalp"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -70,10 +70,12 @@ input color  InpSweepColor               = clrMagenta;
 input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
 input int    InpStructSwingBars          = 4;           // Swing strength for the M15 structure + MSS confluence (smaller = more swings, matches a finer hand-marked structure)
+input bool   InpShowSwingLabels          = false;       // Show the small HH/HL/LH/LL pivot text labels (off = cleaner chart; BOS/CHoCH + major levels still drawn)
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
-input int    InpMajorSwingBars           = 15;          // Swing strength for MAJOR structure (bigger = only the biggest pivots)
+input double InpMajorMoveATR             = 1.5;         // MAJOR level = a swing after price moved >= this x ATR (significance-based; auto-scales per timeframe). 0 = use bar-count strength instead
+input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
 input int    InpMaxMajorLines            = 4;           // Max major lines per side
 input color  InpMajorStructColor         = clrBlue;     // Major-structure level color
 input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
@@ -893,15 +895,21 @@ void DrawStructureTF(ENUM_TIMEFRAMES tf, color hiCol, color loCol, string tag, i
          if(IsSwingHigh(rr, j, k))
            {
             refHigh = rr[j].high; refHighT = rr[j].time; haveRefHigh = true;
-            string lbl = !havePrevSH ? "H" : (rr[j].high > prevSH ? "HH" : "LH");
-            TextAt(PFX + "MS_" + tag + "H_" + IntegerToString((int)rr[j].time), rr[j].time, rr[j].high, tag + lbl, hiCol, ANCHOR_LOWER);
+            if(InpShowSwingLabels)
+              {
+               string lbl = !havePrevSH ? "H" : (rr[j].high > prevSH ? "HH" : "LH");
+               TextAt(PFX + "MS_" + tag + "H_" + IntegerToString((int)rr[j].time), rr[j].time, rr[j].high, tag + lbl, hiCol, ANCHOR_LOWER);
+              }
             prevSH = rr[j].high; havePrevSH = true;
            }
          if(IsSwingLow(rr, j, k))
            {
             refLow = rr[j].low; refLowT = rr[j].time; haveRefLow = true;
-            string lbl = !havePrevSL ? "L" : (rr[j].low < prevSL ? "LL" : "HL");
-            TextAt(PFX + "MS_" + tag + "L_" + IntegerToString((int)rr[j].time), rr[j].time, rr[j].low, tag + lbl, loCol, ANCHOR_UPPER);
+            if(InpShowSwingLabels)
+              {
+               string lbl = !havePrevSL ? "L" : (rr[j].low < prevSL ? "LL" : "HL");
+               TextAt(PFX + "MS_" + tag + "L_" + IntegerToString((int)rr[j].time), rr[j].time, rr[j].low, tag + lbl, loCol, ANCHOR_UPPER);
+              }
             prevSL = rr[j].low; havePrevSL = true;
            }
         }
@@ -917,10 +925,14 @@ int MTFBars(ENUM_TIMEFRAMES tf, int fromBars)
   }
 
 //+------------------------------------------------------------------+
-//| MAJOR structure: the biggest swing highs/lows (strength           |
-//| InpMajorSwingBars) drawn as horizontal level lines extending      |
-//| right -- the significant range structure, not the minor swings.   |
-//| Only the most recent few per side, to stay readable.              |
+//| MAJOR structure by SIGNIFICANCE, not a fixed bar count. An ATR-    |
+//| scaled zigzag: a swing is only confirmed once price reverses by    |
+//| >= InpMajorMoveATR * ATR from the extreme, so a level that led to  |
+//| a big move (lots of internal liquidity worked through it) becomes  |
+//| a major high/low. Because it keys off ATR it auto-adapts to the    |
+//| timeframe -- M5 gets its own majors, M15 its own. Labelled         |
+//| HH/HL/LH/LL and drawn as level lines ending at first contact.      |
+//| Falls back to bar-count strength when InpMajorMoveATR = 0.         |
 //+------------------------------------------------------------------+
 void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
   {
@@ -928,34 +940,87 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
    MqlRates rr[];
    ArraySetAsSeries(rr, true);
    int total = CopyRates(_Symbol, tf, 1, barsWanted, rr);
-   int k = InpMajorSwingBars;
-   if(total < 2 * k + 5) return;
-
+   if(total < 10) return;
    datetime tNow = rr[0].time;
-   int hc = 0, lc = 0;
-   for(int i = k; i < total - k; i++)                 // newest -> oldest
+
+   // ---- collect the major pivots (chronological: oldest first) ----
+   int    pIdx[];  double pPx[];  bool pHi[];
+   ArrayResize(pIdx, 0); ArrayResize(pPx, 0); ArrayResize(pHi, 0);
+
+   double atr = GetATR();
+   if(InpMajorMoveATR > 0.0 && atr > 0.0)
      {
-      if(hc >= InpMaxMajorLines && lc >= InpMaxMajorLines) break;
-      if(hc < InpMaxMajorLines && IsSwingHigh(rr, i, k))
+      double thresh = InpMajorMoveATR * atr;             // ATR-scaled reversal (adapts per TF)
+      double curHi = rr[total - 1].high; int curHiIdx = total - 1;
+      double curLo = rr[total - 1].low;  int curLoIdx = total - 1;
+      int    dir   = 0;                                  // +1 up-leg, -1 down-leg
+      for(int i = total - 2; i >= 0; i--)                // oldest -> newest
         {
-         double   lvl = rr[i].high;
-         datetime end = tNow;                          // stop the line at first contact
-         for(int j = i - 1; j >= 0; j--)
-            if(rr[j].high >= lvl) { end = rr[j].time; break; }
+         if(rr[i].high > curHi) { curHi = rr[i].high; curHiIdx = i; }
+         if(rr[i].low  < curLo) { curLo = rr[i].low;  curLoIdx = i; }
+         if(dir != -1 && rr[i].low <= curHi - thresh)    // reversed down off the high
+           {
+            int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
+            pIdx[s]=curHiIdx; pPx[s]=curHi; pHi[s]=true;
+            dir = -1; curLo = rr[i].low; curLoIdx = i;
+           }
+         else if(dir != 1 && rr[i].high >= curLo + thresh)  // reversed up off the low
+           {
+            int s = ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
+            pIdx[s]=curLoIdx; pPx[s]=curLo; pHi[s]=false;
+            dir = 1; curHi = rr[i].high; curHiIdx = i;
+           }
+        }
+     }
+   else                                                  // fallback: fractal strength
+     {
+      int k = InpMajorSwingBars;
+      if(total < 2 * k + 5) return;
+      for(int i = total - k - 1; i >= k; i--)            // oldest -> newest
+        {
+         if(IsSwingHigh(rr, i, k))
+           { int s=ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
+             pIdx[s]=i; pPx[s]=rr[i].high; pHi[s]=true; }
+         if(IsSwingLow(rr, i, k))
+           { int s=ArraySize(pIdx); ArrayResize(pIdx,s+1); ArrayResize(pPx,s+1); ArrayResize(pHi,s+1);
+             pIdx[s]=i; pPx[s]=rr[i].low; pHi[s]=false; }
+        }
+     }
+
+   int np = ArraySize(pIdx);
+   if(np == 0) return;
+
+   // ---- label HH/HL/LH/LL vs the prior same-type major (chronological) ----
+   string pLbl[]; ArrayResize(pLbl, np);
+   double ph=0, pl=0; bool haveH=false, haveL=false;
+   for(int p = 0; p < np; p++)
+     {
+      if(pHi[p]) { pLbl[p] = !haveH ? "H" : (pPx[p] > ph ? "HH" : "LH"); ph = pPx[p]; haveH = true; }
+      else       { pLbl[p] = !haveL ? "L" : (pPx[p] < pl ? "LL" : "HL"); pl = pPx[p]; haveL = true; }
+     }
+
+   // ---- draw the most recent few per side (newest first) ----
+   int hc = 0, lc = 0;
+   for(int p = np - 1; p >= 0 && (hc < InpMaxMajorLines || lc < InpMaxMajorLines); p--)
+     {
+      int i = pIdx[p]; double lvl = pPx[p];
+      datetime end = tNow;
+      if(pHi[p])
+        {
+         if(hc >= InpMaxMajorLines) continue;
+         for(int j = i - 1; j >= 0; j--) if(rr[j].high >= lvl) { end = rr[j].time; break; }
          string nm = PFX + "MS_MAJH_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
-         TextAt(nm + "t", rr[i].time, lvl, "Major H ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
+         TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
          hc++;
         }
-      if(lc < InpMaxMajorLines && IsSwingLow(rr, i, k))
+      else
         {
-         double   lvl = rr[i].low;
-         datetime end = tNow;
-         for(int j = i - 1; j >= 0; j--)
-            if(rr[j].low <= lvl) { end = rr[j].time; break; }
+         if(lc >= InpMaxMajorLines) continue;
+         for(int j = i - 1; j >= 0; j--) if(rr[j].low <= lvl) { end = rr[j].time; break; }
          string nm = PFX + "MS_MAJL_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
-         TextAt(nm + "t", rr[i].time, lvl, "Major L ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
+         TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
          lc++;
         }
      }
