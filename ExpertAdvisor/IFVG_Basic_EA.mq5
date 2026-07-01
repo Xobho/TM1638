@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.49"
-#property description "Inversion FVG; adaptive structure, decluttered BOS/CHoCH"
+#property version   "1.50"
+#property description "Inversion FVG; major levels over a days window, adaptive structure"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -79,7 +79,8 @@ input color  InpCHoCHColor               = clrOrange;   // Change of Character (
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
 input double InpMajorMoveATR             = 2.5;         // MAJOR level = a swing after price reversed >= this x ATR (significance; auto-scales per TF; bigger = fewer, only the biggest). 0 = use bar-count strength
 input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
-input int    InpMaxMajorLines            = 4;           // Max major lines per side
+input double InpMajorDays                 = 10.0;        // Draw major levels going back at least this many days
+input int    InpMaxMajorLines            = 4;           // (legacy) max major lines per side -- ignored; the days window governs
 input color  InpMajorStructColor         = clrBlue;     // Major-structure level color
 input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
 input ENUM_TIMEFRAMES InpStructTF2       = PERIOD_H1;   // Extra structure timeframe #1
@@ -1052,29 +1053,26 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
       else       { pLbl[p] = !haveL ? "L" : (pPx[p] < pl ? "LL" : "HL"); pl = pPx[p]; haveL = true; }
      }
 
-   // ---- draw the most recent few per side (newest first) ----
-   int hc = 0, lc = 0;
-   for(int p = np - 1; p >= 0 && (hc < InpMaxMajorLines || lc < InpMaxMajorLines); p--)
+   // ---- draw every major within the requested history window (newest first) ----
+   datetime cutoff = tNow - (datetime)(InpMajorDays * 86400.0);   // at least this far back
+   for(int p = np - 1; p >= 0; p--)
      {
       int i = pIdx[p]; double lvl = pPx[p];
+      if(rr[i].time < cutoff) break;                    // older than the window -> stop
       datetime end = tNow;
       if(pHi[p])
         {
-         if(hc >= InpMaxMajorLines) continue;
          for(int j = i - 1; j >= 0; j--) if(rr[j].high >= lvl) { end = rr[j].time; break; }
          string nm = PFX + "MS_MAJH_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
          TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
-         hc++;
         }
       else
         {
-         if(lc >= InpMaxMajorLines) continue;
          for(int j = i - 1; j >= 0; j--) if(rr[j].low <= lvl) { end = rr[j].time; break; }
          string nm = PFX + "MS_MAJL_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
          TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
-         lc++;
         }
      }
   }
@@ -1084,8 +1082,15 @@ void DrawStructure(int total)
    if(!InpShowStructure) return;
    DrawStructureTF(_Period, InpStructHighColor, InpStructLowColor, "", total);
    // Major structure is read from the CHART timeframe, so structure and
-   // liquidity adapt to whatever TF you view (M5, M15, H1...).
-   DrawMajorStructure((ENUM_TIMEFRAMES)_Period, total);
+   // liquidity adapt to whatever TF you view. Fetch enough bars to cover the
+   // requested history window (InpMajorDays) even if the scan window is shorter.
+   int majBars = total;
+   if(PeriodSeconds(_Period) > 0)
+     {
+      int wantDays = (int)MathRound(InpMajorDays * 24.0 * 3600.0 / PeriodSeconds(_Period)) + 4 * InpATRPeriod + 20;
+      majBars = (int)MathMin(6000.0, MathMax((double)total, (double)wantDays));
+     }
+   DrawMajorStructure((ENUM_TIMEFRAMES)_Period, majBars);
    if(InpMTFStructure)
      {
       DrawStructureTF(InpStructTF2, InpStructTF2Color, InpStructTF2Color, ShortTF(InpStructTF2) + " ", MTFBars(InpStructTF2, total));
