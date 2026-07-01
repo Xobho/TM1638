@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.47"
-#property description "Inversion FVG; clustered-liquidity sweeps, HTF major structure"
+#property version   "1.48"
+#property description "Inversion FVG; structure & liquidity adapt to the chart TF"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -76,7 +76,6 @@ input bool   InpShowSwingLabels          = false;       // Show the small HH/HL/
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
-input ENUM_TIMEFRAMES InpMajorTF         = PERIOD_M15;  // Timeframe the MAJOR structure is read from (e.g. keep M15 while you execute on M5). PERIOD_CURRENT = chart TF
 input double InpMajorMoveATR             = 2.5;         // MAJOR level = a swing after price reversed >= this x ATR (significance; auto-scales per TF; bigger = fewer, only the biggest). 0 = use bar-count strength
 input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
 input int    InpMaxMajorLines            = 4;           // Max major lines per side
@@ -1074,11 +1073,9 @@ void DrawStructure(int total)
   {
    if(!InpShowStructure) return;
    DrawStructureTF(_Period, InpStructHighColor, InpStructLowColor, "", total);
-   // Major structure from a FIXED timeframe (e.g. M15) so it stays the same
-   // reference when you drop to M5 to execute. PERIOD_CURRENT = chart TF.
-   ENUM_TIMEFRAMES majTF = (InpMajorTF == PERIOD_CURRENT) ? (ENUM_TIMEFRAMES)_Period : InpMajorTF;
-   int majBars = (majTF == (ENUM_TIMEFRAMES)_Period) ? total : (int)MathMax(MTFBars(majTF, total), 250.0);
-   DrawMajorStructure(majTF, majBars);
+   // Major structure is read from the CHART timeframe, so structure and
+   // liquidity adapt to whatever TF you view (M5, M15, H1...).
+   DrawMajorStructure((ENUM_TIMEFRAMES)_Period, total);
    if(InpMTFStructure)
      {
       DrawStructureTF(InpStructTF2, InpStructTF2Color, InpStructTF2Color, ShortTF(InpStructTF2) + " ", MTFBars(InpStructTF2, total));
