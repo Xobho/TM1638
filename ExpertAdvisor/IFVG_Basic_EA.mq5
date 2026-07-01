@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.41"
+#property version   "1.42"
 #property description "Inversion FVG; sweep-driven, spread-aware levels, M15 scalp"
 
 #include <Trade\Trade.mqh>
@@ -139,6 +139,7 @@ bool     g_useHTFBias       = true;
 bool     g_useMSS           = false;
 bool     g_useSweep         = true;
 int      g_sweepLookback    = 96;
+int      g_sweepSwingBars   = 8;
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
 double   g_beTriggerR       = 1.0;
@@ -225,6 +226,7 @@ int OnInit()
    g_useMSS            = InpUseMSS;
    g_useSweep          = InpUseLiquiditySweep;
    g_sweepLookback     = InpSweepLookback;
+   g_sweepSwingBars    = InpSweepSwingBars;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
    g_beTriggerR        = InpBETriggerR;
@@ -235,6 +237,7 @@ int OnInit()
       g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
       g_useSweep          = true;           // the sweep is THE confluence -- always required here
       g_sweepLookback     = MathMax(InpSweepLookback, 96);  // reach back far enough to catch a MAJOR high swept much later
+      g_sweepSwingBars    = MathMax(InpSweepSwingBars, 8);  // only real swings count as swept liquidity, not noise
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
       g_beTriggerR        = InpScalpBETriggerR; // protect almost immediately
@@ -416,45 +419,51 @@ void ComputeHTFBias()                               // current bias, for the das
 //| is prior RESTING liquidity (an untapped swing high/low): the FIRST |
 //| time price trades up to it, it must poke through and CLOSE back    |
 //| the other side (a grab + rejection). If price instead closes       |
-//| through it, the pool is spent, not swept -- move on.               |
-//| The pool may be far back (a major high taken out much later), so   |
-//| the search runs over g_sweepLookback bars, nearest pool first.     |
+//| through it, the pool is spent, not swept.                          |
+//| We return the MOST SIGNIFICANT swept pool -- the HIGHEST swept high |
+//| (or LOWEST swept low) in the window -- because a real sweep takes  |
+//| out the EXTREME liquidity (the range/major high), not a minor high  |
+//| just above the zone. The pool may be far back (a major high taken   |
+//| out much later), so the search spans g_sweepLookback bars.         |
 //+------------------------------------------------------------------+
 bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
                 double gapLow, double gapHigh,
                 datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
   {
-   int k    = InpSweepSwingBars;                   // must be a SIGNIFICANT pool, not any minor swing
-   int last = MathMin(total - k - 1, m + g_sweepLookback);
-   for(int i = m + 2; i <= last; i++)              // pools before the FVG, nearest first
+   int  k    = g_sweepSwingBars;                   // must be a SIGNIFICANT pool, not any minor swing
+   int  last = MathMin(total - k - 1, m + g_sweepLookback);
+   bool found = false;
+   for(int i = m + 2; i <= last; i++)              // pools before the FVG
      {
       if(bearish && IsSwingHigh(r, i, k))
         {
          double level = r[i].high;
          if(level < gapLow) continue;              // must be REAL overhead liquidity (at/above the zone)
+         if(found && level <= swLevel) continue;   // already have a HIGHER swept pool -> skip lesser highs
          for(int j = i - 1; j >= brk; j--)         // walk forward to the FIRST time the pool is reached
            {
             if(r[j].high <= level) continue;       // pool not reached yet -> still resting
             // First touch: a sweep only if it closes back below AND reached the zone.
             if(r[j].close < level && r[j].high >= gapHigh)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; return true; }
-            break;                                 // pool broken/spent here -> not this pool's sweep
+              { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
+            break;                                 // pool broken/spent here
            }
         }
       if(!bearish && IsSwingLow(r, i, k))
         {
          double level = r[i].low;
          if(level > gapHigh) continue;             // real liquidity below (at/below the zone)
+         if(found && level >= swLevel) continue;   // already have a LOWER swept pool
          for(int j = i - 1; j >= brk; j--)
            {
             if(r[j].low >= level) continue;        // pool not reached yet
             if(r[j].close > level && r[j].low <= gapLow)
-              { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; return true; }
+              { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
             break;
            }
         }
      }
-   return false;
+   return found;
   }
 
 //+------------------------------------------------------------------+
