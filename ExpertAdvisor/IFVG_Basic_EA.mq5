@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.46"
-#property description "Inversion FVG; HTF major structure overlay, M15 scalp"
+#property version   "1.47"
+#property description "Inversion FVG; clustered-liquidity sweeps, HTF major structure"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -47,6 +47,8 @@ input bool   InpUseLiquiditySweep        = true;        // KEY confluence: requi
 input bool   InpUseMSS                   = false;       // Require the break candle to ALSO shift structure (redundant when a sweep is required; off by default)
 input int    InpSweepLookback            = 96;          // Bars before the gap to look for the swept pool (big enough to catch a major high/low taken out much later; scalp forces >=96)
 input int    InpSweepSwingBars           = 8;           // Swing strength a SWEPT pool must have (bigger = only real/major liquidity, not minor wiggles; set = External value to require a drawn BSL/SSL)
+input int    InpSweepMinTouches          = 2;           // Swept level must be tapped by >= this many inner swings (equal highs/lows = real resting liquidity; 1 = any single swing)
+input double InpSweepTouchTolATR         = 0.15;        // How close (x ATR) a swing must be to the level to count as a touch of that liquidity
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
@@ -435,6 +437,25 @@ void ComputeHTFBias()                               // current bias, for the das
    HTFBiasAt(TimeCurrent(), g_htfUp, g_htfDown);
   }
 
+// Count how many inner swings have TAPPED a price level (within tol) across
+// [from,to]. A level touched by several swings is real resting liquidity
+// (equal highs / lows), not a one-off wiggle -- this is how we tell a genuine
+// liquidity pool from noise.
+int CountLiquidityTouches(const MqlRates &r[], int total, double level, bool isHigh,
+                          double tol, int from, int to)
+  {
+   int kt = 2;                                      // a minor swing = one touch
+   int c  = 0;
+   from = MathMax(from, kt);
+   to   = MathMin(to, total - kt - 1);
+   for(int i = from; i <= to; i++)
+     {
+      if(isHigh) { if(IsSwingHigh(r, i, kt) && MathAbs(r[i].high - level) <= tol) c++; }
+      else       { if(IsSwingLow (r, i, kt) && MathAbs(r[i].low  - level) <= tol) c++; }
+     }
+   return c;
+  }
+
 //+------------------------------------------------------------------+
 //| Confluence: a liquidity sweep before the inversion. The swept pool |
 //| is prior RESTING liquidity (an untapped swing high/low): the FIRST |
@@ -451,9 +472,10 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
                 double gapLow, double gapHigh,
                 datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
   {
-   int  k    = g_sweepSwingBars;                   // must be a SIGNIFICANT pool, not any minor swing
-   int  last = MathMin(total - k - 1, m + g_sweepLookback);
-   bool found = false;
+   int    k    = g_sweepSwingBars;                 // must be a SIGNIFICANT pool, not any minor swing
+   int    last = MathMin(total - k - 1, m + g_sweepLookback);
+   double tol  = InpSweepTouchTolATR * GetATR();   // how near a swing must be to count as a touch
+   bool   found = false;
    for(int i = m + 2; i <= last; i++)              // pools before the FVG
      {
       if(bearish && IsSwingHigh(r, i, k))
@@ -464,8 +486,10 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
          for(int j = i - 1; j >= brk; j--)         // walk forward to the FIRST time the pool is reached
            {
             if(r[j].high <= level) continue;       // pool not reached yet -> still resting
-            // First touch: a sweep only if it closes back below AND reached the zone.
-            if(r[j].close < level && r[j].high >= gapHigh)
+            // First touch: a sweep only if it closes back below AND reached the zone,
+            // AND the level is real clustered liquidity (tapped by >= min inner swings).
+            if(r[j].close < level && r[j].high >= gapHigh &&
+               CountLiquidityTouches(r, total, level, true, tol, brk, last) >= InpSweepMinTouches)
               { swTime = r[i].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
             break;                                 // pool broken/spent here
            }
@@ -478,7 +502,8 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
          for(int j = i - 1; j >= brk; j--)
            {
             if(r[j].low >= level) continue;        // pool not reached yet
-            if(r[j].close > level && r[j].low <= gapLow)
+            if(r[j].close > level && r[j].low <= gapLow &&
+               CountLiquidityTouches(r, total, level, false, tol, brk, last) >= InpSweepMinTouches)
               { swTime = r[i].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
             break;
            }
@@ -1914,7 +1939,8 @@ void Scan()
       if(InpShowDrawings) DrawSetup(setups[i], i);
       if(setups[i].bullish) g_lastBull++; else g_lastBear++;
      }
-   if(InpShowDrawings) DrawGhosts();
+   // Ghost (rejected) zones are disabled -- they cluttered the chart. The wipe
+   // above still clears any left over from a previous version.
 
    // The MONITORED setup = the freshest one still WAITING to trigger (untested
    // and with its entry still ahead on the correct side). It adapts: when a
