@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.42"
+#property version   "1.43"
 #property description "Inversion FVG; sweep-driven, spread-aware levels, M15 scalp"
 
 #include <Trade\Trade.mqh>
@@ -28,7 +28,7 @@ CTrade g_trade;
 input group "=== Scalp mode ==="
 input bool   InpScalpMode                 = true;        // ON: pure M15 in-and-out -- ignores HTF bias, fixed tight target, fast break-even, no TP chasing. Overrides the settings below at startup.
 input double InpScalpRR                    = 1.5;         // Scalp target reward:risk (used when Scalp mode is ON)
-input double InpScalpBETriggerR           = 0.5;         // Scalp break-even trigger, in R (protect early; used when Scalp mode is ON)
+input double InpScalpBETriggerR           = 1.0;         // Scalp break-even trigger, in R (1.0 = move SL to entry once trade is +1:1; used when Scalp mode is ON)
 
 input group "=== Timeframe ==="
 input ENUM_TIMEFRAMES InpHTF             = PERIOD_H1;   // Higher timeframe for bias (step 1)
