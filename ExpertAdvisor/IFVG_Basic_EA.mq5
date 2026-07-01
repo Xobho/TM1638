@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.38"
-#property description "Inversion FVG; sweep-driven, adaptive spread cap, M15 scalp"
+#property version   "1.39"
+#property description "Inversion FVG; sweep-driven, spread-aware levels, M15 scalp"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -52,6 +52,7 @@ input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
 input double InpMinRRFilter              = 1.0;         // QUALITY GATE: skip setups whose target is closer than this R:R (0 = take everything)
 input double InpSLBufferATR              = 0.10;        // SL buffer beyond the gap extreme (x ATR)
+input bool   InpSpreadAdjust             = true;        // Shift SELL SL/TP up by the live spread so they align to the chart (sells exit on Ask); avoids being stopped a spread early
 
 input group "=== Visuals ==="
 input bool   InpShowDrawings              = true;        // Master: draw zones/structure/liquidity on the chart (turn OFF for fast backtests)
@@ -661,6 +662,17 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
             s.tp = bearish ? s.entry - (s.sl - s.entry) * g_minRR
                            : s.entry + (s.entry - s.sl) * g_minRR;
             s.tpIsLiquidity = false;
+           }
+
+         // Spread accounting: a SELL enters on Bid but its SL/TP are evaluated
+         // on Ask (= Bid + spread), so both would trigger a spread early. Shift
+         // them up by the spread to keep them on the chart (Bid) levels. A BUY
+         // exits on Bid already, so its SL/TP need no adjustment.
+         if(InpSpreadAdjust && bearish)
+           {
+            double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+            s.sl += spread;
+            s.tp += spread;
            }
          double risk = MathAbs(s.entry - s.sl);
          s.rr = (risk > 0) ? MathAbs(s.tp - s.entry) / risk : 0.0;
