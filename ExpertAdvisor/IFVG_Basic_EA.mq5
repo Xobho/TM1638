@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.37"
-#property description "Inversion FVG; sweep-driven, win-probability read, M15 scalp"
+#property version   "1.38"
+#property description "Inversion FVG; sweep-driven, adaptive spread cap, M15 scalp"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -111,7 +111,8 @@ input double InpLotSize                  = 0.01;        // Fixed lot size
 input int    InpMagic                    = 880011;      // Magic number (this EA's orders)
 input int    InpMaxPositions             = 3;           // Max concurrent orders+positions (this magic)
 input double InpMaxEntryDistATR          = 4.0;         // Don't rest a limit (and cancel ones) farther than this x ATR from price (0 = no cap) -- keeps far setups from hogging slots
-input int    InpMaxSpreadPoints          = 50;          // Skip entries when spread (points) is wider than this (0 = no cap)
+input double InpMaxSpreadATR             = 0.10;        // ADAPTIVE spread cap: skip entries when spread > this fraction of ATR (auto-scales Gold/US30/USTEC; 0 = off)
+input int    InpMaxSpreadPoints          = 0;           // Optional FIXED spread cap in points (0 = off; use only to hard-limit a specific symbol)
 input double InpPendingExpiryHrs         = 12.0;        // Cancel an unfilled LIMIT after N hours (0 = GTC; limit mode only)
 input bool   InpTradeBuys                = true;        // Allow buy setups
 input bool   InpTradeSells               = true;        // Allow sell setups
@@ -1214,7 +1215,10 @@ void Dashboard()
    SetVal("Mode", (InpScalpMode ? "SCALP (M15 in/out)" : "Positional (HTF)")
                   + StringFormat("  RR>=%.1f", g_minRR), InpScalpMode ? clrGold : clrAqua);
    SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
-   SetVal("Mkt",  IntegerToString((int)spr) + " pts   ATR " + DoubleToString(atr, _Digits), clrSilver);
+   int    sprCap = EffMaxSpreadPts();
+   string sprTxt = "spread " + IntegerToString((int)spr) + (sprCap > 0 ? "/" + IntegerToString(sprCap) : "/-")
+                   + " pts   ATR " + DoubleToString(atr, _Digits);
+   SetVal("Mkt",  sprTxt, (sprCap > 0 && spr > sprCap) ? clrTomato : clrSilver);
    string fl = (g_useSweep ? "Sweep " : "") + (g_useMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
    if(fl == "") fl = "none";
    SetVal("Filt", fl, clrAqua);
@@ -1408,10 +1412,28 @@ bool TradingAllowed()
   }
 
 // Spread guard: skip entries when the spread is abnormally wide.
+// Effective max spread in POINTS for THIS symbol. The ATR fraction adapts to
+// the instrument (Gold/US30/USTEC); an optional fixed cap tightens it further.
+// 0 = no cap in force.
+int EffMaxSpreadPts()
+  {
+   int cap = 0;                                          // 0 = unlimited
+   if(InpMaxSpreadATR > 0.0)
+     {
+      double atr = GetATR();
+      if(atr > 0.0 && _Point > 0.0)
+         cap = (int)MathRound(InpMaxSpreadATR * atr / _Point);
+     }
+   if(InpMaxSpreadPoints > 0)
+      cap = (cap > 0) ? MathMin(cap, InpMaxSpreadPoints) : InpMaxSpreadPoints;
+   return cap;
+  }
+
 bool SpreadOK()
   {
-   if(InpMaxSpreadPoints <= 0) return true;
-   return (long)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= InpMaxSpreadPoints;
+   int cap = EffMaxSpreadPts();
+   if(cap <= 0) return true;
+   return (long)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= cap;
   }
 
 // Broker minimum distance for SL/TP/pending price (the bigger of stops & freeze level).
