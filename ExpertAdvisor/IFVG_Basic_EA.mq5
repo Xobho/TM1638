@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.43"
+#property version   "1.44"
 #property description "Inversion FVG; sweep-driven, spread-aware levels, M15 scalp"
 
 #include <Trade\Trade.mqh>
@@ -1241,7 +1241,8 @@ void Dashboard()
 
    SetVal("Sym",  _Symbol + "  " + ShortTF((ENUM_TIMEFRAMES)_Period), clrWhite);
    SetVal("Mode", (InpScalpMode ? "SCALP (M15 in/out)" : "Positional (HTF)")
-                  + StringFormat("  RR>=%.1f", g_minRR), InpScalpMode ? clrGold : clrAqua);
+                  + StringFormat("  RR>=%.1f  BE %.1fR", g_minRR, (InpBreakEven ? g_beTriggerR : 0.0)),
+                  InpScalpMode ? clrGold : clrAqua);
    SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
    int    sprCap = EffMaxSpreadPts();
    string sprTxt = "spread " + IntegerToString((int)spr) + (sprCap > 0 ? "/" + IntegerToString(sprCap) : "/-")
