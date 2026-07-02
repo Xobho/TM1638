@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.72"
-#property description "Inversion FVG scalper; fresh gaps only, sweep tied to the inversion"
+#property version   "1.73"
+#property description "Inversion FVG scalper; run-and-reclaim sweeps (multi-candle takes)"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -50,6 +50,7 @@ input bool   InpUseMSS                   = false;       // Require the break can
 // InpMajorPivotBars (Visuals group) -- the drawn Major lines ARE the pools.
 input double InpSweepMaxDistATR          = 3.0;         // Swept Major level must sit within this x ATR of the zone (a pool far away is not THIS setup's liquidity; 0 = no cap)
 input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the inversion candle (the sweep must be what CAUSED this reversal; 0 = no cap)
+input int    InpSweepReclaimBars         = 3;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (run-and-reclaim = swept; stays broken = CHoCH). 1 = same-candle only
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
@@ -481,6 +482,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
    int    np      = ArraySize(g_majPx);
    double maxDist = (InpSweepMaxDistATR > 0 && atr > 0) ? InpSweepMaxDistATR * atr : DBL_MAX;
    int    oldestJ = (InpSweepMaxBarsBack > 0) ? brk + InpSweepMaxBarsBack : total; // grab must be shortly BEFORE the inversion (it caused this reversal)
+   int    reclaim = (InpSweepReclaimBars > 1) ? InpSweepReclaimBars : 1;           // candles allowed for the run-and-reclaim
    bool   found = false;
    for(int p = 0; p < np; p++)
      {
@@ -497,17 +499,28 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
             if(r[j].high <= level) continue;       // not reached yet -> still resting
             // Grab must be recent: sweep -> reversal -> inversion, one play.
             if(j > oldestJ) break;                 // grabbed long before the inversion -> stale, not its sweep
-            if(r[j].close < level && r[j].high >= gapHigh)   // grabbed + rejected + reached zone
+
+            // Run-and-reclaim: the take may span a few candles. Price may even
+            // CLOSE above the level, but must close back BELOW it within the
+            // reclaim window -- otherwise the level BROKE (CHoCH), not swept.
+            int lastC = j - (reclaim - 1); if(lastC < brk) lastC = brk;
+            double runHigh = 0.0; int extIdx = j; int rec = -1;
+            for(int c = j; c >= lastC; c--)
               {
-               // If price later runs ABOVE the grab's wick before the inversion,
-               // the level actually broke (CHoCH) -- that was no grab.
-               bool ranThrough = false;
-               for(int x = j - 1; x >= brk; x--)
-                  if(r[x].high > r[j].high) { ranThrough = true; break; }
-               if(!ranThrough)
-                 { swTime = r[idx].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
+               if(r[c].high > runHigh) { runHigh = r[c].high; extIdx = c; }
+               if(r[c].close < level)  { rec = c; break; }
               }
-            break;                                 // level broken/spent here
+            if(rec >= 0 && runHigh >= gapHigh)     // reclaimed + the run reached the zone
+              {
+               // If price later runs ABOVE the grab's extreme before the
+               // inversion, the level actually broke after all -- no grab.
+               bool ranThrough = false;
+               for(int x = rec - 1; x >= brk; x--)
+                  if(r[x].high > runHigh) { ranThrough = true; break; }
+               if(!ranThrough)
+                 { swTime = r[idx].time; swLevel = level; swExtreme = runHigh; swBreak = r[extIdx].time; found = true; }
+              }
+            break;                                 // first-touch event handled either way
            }
         }
       else if(!bearish && !g_majHi[p])             // a Major LOW taken out = buy-side sweep
@@ -520,13 +533,21 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
            {
             if(r[j].low >= level) continue;
             if(j > oldestJ) break;                 // grabbed long before the inversion -> stale
-            if(r[j].close > level && r[j].low <= gapLow)
+
+            int lastC = j - (reclaim - 1); if(lastC < brk) lastC = brk;
+            double runLow = DBL_MAX; int extIdx = j; int rec = -1;
+            for(int c = j; c >= lastC; c--)
               {
-               bool ranThrough = false;            // grab wick later violated = level broke, not swept
-               for(int x = j - 1; x >= brk; x--)
-                  if(r[x].low < r[j].low) { ranThrough = true; break; }
+               if(r[c].low < runLow)  { runLow = r[c].low; extIdx = c; }
+               if(r[c].close > level) { rec = c; break; }
+              }
+            if(rec >= 0 && runLow <= gapLow)
+              {
+               bool ranThrough = false;            // grab extreme later violated = level broke, not swept
+               for(int x = rec - 1; x >= brk; x--)
+                  if(r[x].low < runLow) { ranThrough = true; break; }
                if(!ranThrough)
-                 { swTime = r[idx].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
+                 { swTime = r[idx].time; swLevel = level; swExtreme = runLow; swBreak = r[extIdx].time; found = true; }
               }
             break;
            }
