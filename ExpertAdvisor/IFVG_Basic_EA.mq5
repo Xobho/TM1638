@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.70"
-#property description "Inversion FVG scalper; evidence-based setup reliability (factor stats)"
+#property version   "1.71"
+#property description "Inversion FVG scalper; SL floor/cap, failed-grab (CHoCH) invalidation"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -54,6 +54,8 @@ input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
 input double InpMinRRFilter              = 1.0;         // QUALITY GATE: skip setups whose target is closer than this R:R (0 = take everything)
 input double InpSLBufferATR              = 0.10;        // SL buffer beyond the gap extreme (x ATR)
+input double InpMinSLATR                 = 0.50;        // SL FLOOR: widen SL to at least this x ATR from entry (thin-zone SLs get wicked out by noise; risk-% sizing keeps the $ risk unchanged)
+input double InpMaxSLATR                 = 2.50;        // SL CAP: skip setups whose SL would be wider than this x ATR (0 = off)
 input bool   InpSpreadAdjust             = true;        // Shift SELL SL/TP up by the live spread so they align to the chart (sells exit on Ask); avoids being stopped a spread early
 input bool   InpBuyEntrySpreadAdj        = true;        // Lift BUY entry by the live spread so the buy fills when the Bid chart touches the zone top (buys fill at Ask); avoids missing thin retests
 
@@ -495,7 +497,15 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
             // Grab must be recent (just before/at the FVG): sweep -> reversal -> FVG.
             if(j > oldestJ) break;                 // grabbed long before this FVG -> stale, not its sweep
             if(r[j].close < level && r[j].high >= gapHigh)   // grabbed + rejected + reached zone
-              { swTime = r[idx].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
+              {
+               // If price later runs ABOVE the grab's wick before the inversion,
+               // the level actually broke (CHoCH) -- that was no grab.
+               bool ranThrough = false;
+               for(int x = j - 1; x >= brk; x--)
+                  if(r[x].high > r[j].high) { ranThrough = true; break; }
+               if(!ranThrough)
+                 { swTime = r[idx].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
+              }
             break;                                 // level broken/spent here
            }
         }
@@ -510,7 +520,13 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
             if(r[j].low >= level) continue;
             if(j > oldestJ) break;                 // grabbed long before this FVG -> stale
             if(r[j].close > level && r[j].low <= gapLow)
-              { swTime = r[idx].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
+              {
+               bool ranThrough = false;            // grab wick later violated = level broke, not swept
+               for(int x = j - 1; x >= brk; x--)
+                  if(r[x].low < r[j].low) { ranThrough = true; break; }
+               if(!ranThrough)
+                 { swTime = r[idx].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
+              }
             break;
            }
         }
@@ -741,8 +757,23 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          s.hadMSS = hadMSS; s.mssTime = mssTime; s.mssLevel = mssLevel;
 
          s.tested = false;
+         int touchIdx = -1;
          for(int j = brk - 1; j >= 0; j--)
-            if(r[j].low <= gapHigh && r[j].high >= gapLow) { s.tested = true; break; }
+            if(r[j].low <= gapHigh && r[j].high >= gapLow) { s.tested = true; touchIdx = j; break; }
+
+         // A grab whose wick extreme gets RUN THROUGH after the inversion but
+         // BEFORE the retest is not a grab anymore -- the level broke (CHoCH /
+         // continuation), so the reversal premise is gone and the setup is void.
+         // (After the retest a live trade's SL owns the risk instead.)
+         if(hadSweep)
+           {
+            int stopAt = (touchIdx >= 0) ? touchIdx + 1 : 0;
+            bool grabFailed = false;
+            for(int x = brk - 1; x >= stopAt; x--)
+               if(bearish ? (r[x].high > swExtreme) : (r[x].low < swExtreme)) { grabFailed = true; break; }
+            if(grabFailed)
+              { RecReject(diag, bearish, "sweep failed"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "sweep failed"); continue; }
+           }
 
          double price = r[0].close;
          s.stage = (price >= gapLow && price <= gapHigh) ? "ready" : "forming";
@@ -758,6 +789,20 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          if(InpBuyEntrySpreadAdj && !bearish)
             s.entry += spread;
          s.sl    = bearish ? gapHigh + buf : gapLow - buf;
+
+         // SL floor: a thin zone gives a stop so tight that spread/noise kills
+         // it (e.g. 0.6$ on gold). Widen to the ATR floor -- the risk-% lot
+         // shrinks to match, so $ risk is unchanged while survival improves.
+         if(InpMinSLATR > 0)
+           {
+            double minSL = InpMinSLATR * atr;
+            if(MathAbs(s.entry - s.sl) < minSL)
+               s.sl = bearish ? s.entry + minSL : s.entry - minSL;
+           }
+         // SL cap: a stop wider than this is a different trade class -- skip.
+         if(InpMaxSLATR > 0 && MathAbs(s.entry - s.sl) > InpMaxSLATR * atr)
+           { RecReject(diag, bearish, "SL too wide"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "SL too wide"); continue; }
+
          double tp;
          if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
            { s.tp = tp; s.tpIsLiquidity = true; }
