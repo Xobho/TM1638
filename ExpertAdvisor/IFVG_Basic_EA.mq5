@@ -18,8 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.80"
+#property version   "1.81"
 #property description "Inversion FVG scalper; Major-H/L-driven: sweep starts it, wick bounds it, next Major is the target"
+
+// Shown on the dashboard header so the running build is always visible.
+// Keep in sync with #property version above.
+#define EA_VER "1.81"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -1517,7 +1521,7 @@ void Dashboard()
       MkRect("BG", x, yTop, panelW, (btnY - yTop) + btnH + 8, C'24,26,32', C'70,80,95');
       MkRect("HB", x, yTop, panelW, headerH,                  C'33,82,120', C'33,82,120');
       MkLbl ("Hdr", keyX, yTop + 4, clrWhite, 10);
-      ObjectSetString(0, DPFX + "Hdr", OBJPROP_TEXT, "INVERSION FVG");
+      ObjectSetString(0, DPFX + "Hdr", OBJPROP_TEXT, "INVERSION FVG  v" + EA_VER);
 
       // click-to-stop button along the bottom of the panel
       string bn = DPFX + "BtnStop";
