@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.81"
+#property version   "1.82"
 #property description "Inversion FVG scalper; Major-H/L-driven: sweep starts it, wick bounds it, next Major is the target"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.81"
+#define EA_VER "1.82"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -44,7 +44,7 @@ input int    InpSwingBars                = 5;           // Bars each side to con
 input int    InpATRPeriod                = 14;          // ATR period (sizes the min gap & SL buffer)
 input double InpMinGapATR                = 0.20;        // Minimum FVG size, as a multiple of ATR
 input int    InpMaxGapAgeBars            = 30;          // FRESHNESS: the gap must be closed-through (inverted) within this many bars of forming -- a leftover gap from an old leg is not today's setup (0 = off)
-input int    InpMaxSetups                = 25;          // Max IFVG zones to draw (most recent first)
+input int    InpMaxSetups                = 100;         // Max IFVG zones to draw, most recent first (big enough that scrolling back shows the marked history; scalp forces >=100)
 
 input group "=== Confluences (filters) ==="
 input bool   InpUseHTFBias               = true;        // Require setup to align with HTF trend
@@ -54,7 +54,8 @@ input bool   InpUseMSS                   = false;       // Require the break can
 // InpMajorPivotBars (Visuals group) -- the drawn Major lines ARE the pools.
 input double InpSweepMaxDistATR          = 3.0;         // Swept Major level must sit within this x ATR of the zone (a pool far away is not THIS setup's liquidity; 0 = no cap)
 input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the inversion candle (the sweep must be what CAUSED this reversal; 0 = no cap)
-input int    InpSweepReclaimBars         = 3;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (run-and-reclaim = swept; stays broken = CHoCH). 1 = same-candle only
+input int    InpSweepReclaimBars         = 8;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (a slow flush is still a grab; scalp forces >=8). 1 = same-candle only
+input double InpSweepMaxDepthATR         = 1.5;         // Max flush depth BEYOND the level (x ATR): shallow = stop-hunt (swept), deep = breakdown (not a grab). This, not time, guards against fading real breakouts (0 = off)
 
 enum ENUM_SL_MODE
   {
@@ -494,6 +495,8 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
    double maxDist = (InpSweepMaxDistATR > 0 && atr > 0) ? InpSweepMaxDistATR * atr : DBL_MAX;
    int    oldestJ = (InpSweepMaxBarsBack > 0) ? brk + InpSweepMaxBarsBack : total; // grab must be shortly BEFORE the inversion (it caused this reversal)
    int    reclaim = (InpSweepReclaimBars > 1) ? InpSweepReclaimBars : 1;           // candles allowed for the run-and-reclaim
+   if(InpScalpMode) reclaim = (int)MathMax(reclaim, 8);                            // scalp: slow flushes count too -- the DEPTH cap guards breakouts
+   double depthCap = (InpSweepMaxDepthATR > 0 && atr > 0) ? InpSweepMaxDepthATR * atr : DBL_MAX;
    bool   found = false;
    for(int p = 0; p < np; p++)
      {
@@ -521,7 +524,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
                if(r[c].high > runHigh) { runHigh = r[c].high; extIdx = c; }
                if(r[c].close < level)  { rec = c; break; }
               }
-            if(rec >= 0 && runHigh >= gapHigh)     // reclaimed + the run reached the zone
+            if(rec >= 0 && runHigh >= gapHigh && runHigh - level <= depthCap)  // reclaimed + reached zone + shallow flush (deep = breakdown)
               {
                // If price later runs ABOVE the grab's extreme before the
                // inversion, the level actually broke after all -- no grab.
@@ -552,7 +555,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
                if(r[c].low < runLow)  { runLow = r[c].low; extIdx = c; }
                if(r[c].close > level) { rec = c; break; }
               }
-            if(rec >= 0 && runLow <= gapLow)
+            if(rec >= 0 && runLow <= gapLow && level - runLow <= depthCap)
               {
                bool ranThrough = false;            // grab extreme later violated = level broke, not swept
                for(int x = rec - 1; x >= brk; x--)
@@ -857,8 +860,14 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // level was grabbed and rejected; it dies exactly when that grab's
          // extreme is run through. Gap-extreme mode keeps the classic tighter stop.
          if(InpSLMode == SL_SWEEP_EXTREME && hadSweep)
+           {
             s.sl = bearish ? MathMax(gapHigh, swExtreme) + buf
                            : MathMin(gapLow,  swExtreme) - buf;
+            // A very tall sweep wick would put the stop too far away -- fall
+            // back to the classic gap-extreme stop instead of losing the trade.
+            if(InpMaxSLATR > 0 && MathAbs(s.entry - s.sl) > InpMaxSLATR * atr)
+               s.sl = bearish ? gapHigh + buf : gapLow - buf;
+           }
          else
             s.sl = bearish ? gapHigh + buf : gapLow - buf;
 
@@ -2214,7 +2223,8 @@ void Scan()
      }
 
    IFVGSetup setups[];
-   int n = FindIFVGs(r, total, setups, InpMaxSetups, true);   // diag=true -> record reject reasons + ghosts
+   int maxs = InpScalpMode ? (int)MathMax(InpMaxSetups, 100) : InpMaxSetups;  // enough zones that history review shows the marks
+   int n = FindIFVGs(r, total, setups, maxs, true);           // diag=true -> record reject reasons + ghosts
    g_lastBull = 0; g_lastBear = 0;
    for(int i = 0; i < n; i++)
      {
