@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.71"
-#property description "Inversion FVG scalper; SL floor/cap, failed-grab (CHoCH) invalidation"
+#property version   "1.72"
+#property description "Inversion FVG scalper; fresh gaps only, sweep tied to the inversion"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -39,6 +39,7 @@ input double InpLookbackHours            = 120.0;       // How far back to scan 
 input int    InpSwingBars                = 5;           // Bars each side to confirm a swing pivot (sweeps / MSS / TP)
 input int    InpATRPeriod                = 14;          // ATR period (sizes the min gap & SL buffer)
 input double InpMinGapATR                = 0.20;        // Minimum FVG size, as a multiple of ATR
+input int    InpMaxGapAgeBars            = 30;          // FRESHNESS: the gap must be closed-through (inverted) within this many bars of forming -- a leftover gap from an old leg is not today's setup (0 = off)
 input int    InpMaxSetups                = 25;          // Max IFVG zones to draw (most recent first)
 
 input group "=== Confluences (filters) ==="
@@ -48,7 +49,7 @@ input bool   InpUseMSS                   = false;       // Require the break can
 // NOTE: the sweep = a MAJOR level taken out. Tune it with InpMajorMoveATR /
 // InpMajorPivotBars (Visuals group) -- the drawn Major lines ARE the pools.
 input double InpSweepMaxDistATR          = 3.0;         // Swept Major level must sit within this x ATR of the zone (a pool far away is not THIS setup's liquidity; 0 = no cap)
-input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the FVG (sweep -> reversal -> FVG causality; 0 = no cap)
+input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the inversion candle (the sweep must be what CAUSED this reversal; 0 = no cap)
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
@@ -479,7 +480,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
   {
    int    np      = ArraySize(g_majPx);
    double maxDist = (InpSweepMaxDistATR > 0 && atr > 0) ? InpSweepMaxDistATR * atr : DBL_MAX;
-   int    oldestJ = (InpSweepMaxBarsBack > 0) ? m + InpSweepMaxBarsBack : total;   // grab must be near the FVG in time
+   int    oldestJ = (InpSweepMaxBarsBack > 0) ? brk + InpSweepMaxBarsBack : total; // grab must be shortly BEFORE the inversion (it caused this reversal)
    bool   found = false;
    for(int p = 0; p < np; p++)
      {
@@ -494,8 +495,8 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
          for(int j = idx - 1; j >= brk; j--)       // first time price returns to the level
            {
             if(r[j].high <= level) continue;       // not reached yet -> still resting
-            // Grab must be recent (just before/at the FVG): sweep -> reversal -> FVG.
-            if(j > oldestJ) break;                 // grabbed long before this FVG -> stale, not its sweep
+            // Grab must be recent: sweep -> reversal -> inversion, one play.
+            if(j > oldestJ) break;                 // grabbed long before the inversion -> stale, not its sweep
             if(r[j].close < level && r[j].high >= gapHigh)   // grabbed + rejected + reached zone
               {
                // If price later runs ABOVE the grab's wick before the inversion,
@@ -518,7 +519,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
          for(int j = idx - 1; j >= brk; j--)
            {
             if(r[j].low >= level) continue;
-            if(j > oldestJ) break;                 // grabbed long before this FVG -> stale
+            if(j > oldestJ) break;                 // grabbed long before the inversion -> stale
             if(r[j].close > level && r[j].low <= gapLow)
               {
                bool ranThrough = false;            // grab wick later violated = level broke, not swept
@@ -708,6 +709,11 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
             if(!bearish && r[j].close > gapHigh) { brk = j; break; }
            }
          if(brk < 0) continue;
+
+         // Freshness: the inversion must follow the gap within the cap. In the
+         // method the sweep, reversal and close-through are ONE play -- a gap
+         // that only gets closed-through a day later is a stale leftover.
+         if(InpMaxGapAgeBars > 0 && (m - brk) > InpMaxGapAgeBars) continue;
 
          // Invalidation: price later closed back through the far side.
          bool failed = false;
