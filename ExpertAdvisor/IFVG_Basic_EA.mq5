@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.61"
-#property description "Inversion FVG scalper; session filter, floating-loss breaker, fast M5 scan"
+#property version   "1.62"
+#property description "Inversion FVG scalper; sweep must be near the zone in price AND time"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -47,6 +47,8 @@ input bool   InpUseLiquiditySweep        = true;        // KEY confluence: requi
 input bool   InpUseMSS                   = false;       // Require the break candle to ALSO shift structure (redundant when a sweep is required; off by default)
 // NOTE: the sweep = a MAJOR level taken out. Tune it with InpMajorMoveATR /
 // InpMajorPivotBars (Visuals group) -- the drawn Major lines ARE the pools.
+input double InpSweepMaxDistATR          = 3.0;         // Swept Major level must sit within this x ATR of the zone (a pool far away is not THIS setup's liquidity; 0 = no cap)
+input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the FVG (sweep -> reversal -> FVG causality; 0 = no cap)
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
@@ -457,11 +459,13 @@ void ComputeHTFBias()                               // current bias, for the das
 //| the sweep that arms the IFVG.                                       |
 //+------------------------------------------------------------------+
 bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
-                double gapLow, double gapHigh,
+                double gapLow, double gapHigh, double atr,
                 datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
   {
-   int  np = ArraySize(g_majPx);
-   bool found = false;
+   int    np      = ArraySize(g_majPx);
+   double maxDist = (InpSweepMaxDistATR > 0 && atr > 0) ? InpSweepMaxDistATR * atr : DBL_MAX;
+   int    oldestJ = (InpSweepMaxBarsBack > 0) ? m + InpSweepMaxBarsBack : total;   // grab must be near the FVG in time
+   bool   found = false;
    for(int p = 0; p < np; p++)
      {
       int idx = g_majIdx[p];
@@ -470,10 +474,13 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
         {
          double level = g_majPx[p];
          if(level < gapLow) continue;              // real overhead liquidity (at/above the zone)
+         if(level - gapHigh > maxDist) continue;   // pool too FAR above the zone = not this setup's liquidity
          if(found && level <= swLevel) continue;   // keep the HIGHEST swept high
          for(int j = idx - 1; j >= brk; j--)       // first time price returns to the level
            {
             if(r[j].high <= level) continue;       // not reached yet -> still resting
+            // Grab must be recent (just before/at the FVG): sweep -> reversal -> FVG.
+            if(j > oldestJ) break;                 // grabbed long before this FVG -> stale, not its sweep
             if(r[j].close < level && r[j].high >= gapHigh)   // grabbed + rejected + reached zone
               { swTime = r[idx].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true; }
             break;                                 // level broken/spent here
@@ -483,10 +490,12 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
         {
          double level = g_majPx[p];
          if(level > gapHigh) continue;             // real liquidity below (at/below the zone)
+         if(gapLow - level > maxDist) continue;    // pool too FAR below the zone
          if(found && level >= swLevel) continue;   // keep the LOWEST swept low
          for(int j = idx - 1; j >= brk; j--)
            {
             if(r[j].low >= level) continue;
+            if(j > oldestJ) break;                 // grabbed long before this FVG -> stale
             if(r[j].close > level && r[j].low <= gapLow)
               { swTime = r[idx].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true; }
             break;
@@ -669,7 +678,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // Confluences -- the liquidity sweep is the PRIMARY reversal signal,
          // so it is checked first; MSS is an optional extra (off by default).
          datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
-         bool hadSweep = CheckSweep(r, total, bearish, m, brk, gapLow, gapHigh, swTime, swLevel, swExtreme, swBreak);
+         bool hadSweep = CheckSweep(r, total, bearish, m, brk, gapLow, gapHigh, atr, swTime, swLevel, swExtreme, swBreak);
          if(g_useSweep && !hadSweep)
            { RecReject(diag, bearish, "no sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no sweep"); continue; }
 
