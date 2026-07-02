@@ -18,7 +18,7 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.60"
+#property version   "1.61"
 #property description "Inversion FVG scalper; session filter, floating-loss breaker, fast M5 scan"
 
 #include <Trade\Trade.mqh>
@@ -254,7 +254,7 @@ int OnInit()
       g_useSweep          = true;           // the sweep is THE confluence -- always required here
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
-      g_beTriggerR        = InpScalpBETriggerR; // protect almost immediately
+      g_beTriggerR        = MathMax(InpScalpBETriggerR, 1.0); // BE no earlier than +1R (a stale saved input can't lower it; raising above 1 is allowed)
       g_cancelCounterBias = false;          // no HTF bias to align the book to
      }
 
