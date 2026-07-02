@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.53"
-#property description "Inversion FVG; sweep = a Major level taken out"
+#property version   "1.60"
+#property description "Inversion FVG scalper; session filter, floating-loss breaker, fast M5 scan"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -45,10 +45,8 @@ input group "=== Confluences (filters) ==="
 input bool   InpUseHTFBias               = true;        // Require setup to align with HTF trend
 input bool   InpUseLiquiditySweep        = true;        // KEY confluence: require a liquidity sweep right before the inversion (the sweep IS the reversal signal)
 input bool   InpUseMSS                   = false;       // Require the break candle to ALSO shift structure (redundant when a sweep is required; off by default)
-input int    InpSweepLookback            = 96;          // Bars before the gap to look for the swept pool (big enough to catch a major high/low taken out much later; scalp forces >=96)
-input int    InpSweepSwingBars           = 8;           // Swing strength a SWEPT pool must have (bigger = only real/major liquidity, not minor wiggles; set = External value to require a drawn BSL/SSL)
-input int    InpSweepMinTouches          = 2;           // Swept level must be tapped by >= this many inner swings (equal highs/lows = real resting liquidity; 1 = any single swing)
-input double InpSweepTouchTolATR         = 0.15;        // How close (x ATR) a swing must be to the level to count as a touch of that liquidity
+// NOTE: the sweep = a MAJOR level taken out. Tune it with InpMajorMoveATR /
+// InpMajorPivotBars (Visuals group) -- the drawn Major lines ARE the pools.
 
 input group "=== Trade levels ==="
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
@@ -128,6 +126,12 @@ input bool   InpTradeSells               = true;        // Allow sell setups
 input bool   InpAdaptTP                   = true;        // Re-target TP to the next liquidity as new swings form (pending + open positions; SL stays fixed)
 input bool   InpCancelCounterBias         = true;        // Cancel pending orders that oppose the current HTF bias (keeps the book trend-aligned, frees slots)
 
+input group "=== Session filter (server time) ==="
+input bool   InpUseSessionFilter         = true;        // Only OPEN new trades inside the session window (open-trade management runs 24/5)
+input int    InpSessionStartHour         = 9;           // Session start hour, BROKER/server time (EET broker: 9 ~ pre-London)
+input int    InpSessionEndHour           = 23;          // Session end hour, server time (23 ~ through the NY session; start>end = overnight window)
+input bool   InpSessionCancelPend        = true;        // Pull unfilled pending limits when the session closes (don't fill overnight)
+
 input group "=== Risk & management ==="
 input double InpRiskPercent              = 0.5;         // Risk % of balance per trade (lot auto-sized from SL distance; 0 = use fixed lot)
 input bool   InpBreakEven                = true;        // Move SL to break-even once the trade is in profit
@@ -146,8 +150,6 @@ input double InpDailyLossLimitUSD        = 5.0;         // Stop new trades after
 bool     g_useHTFBias       = true;
 bool     g_useMSS           = false;
 bool     g_useSweep         = true;
-int      g_sweepLookback    = 96;
-int      g_sweepSwingBars   = 8;
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
 double   g_beTriggerR       = 1.0;
@@ -179,6 +181,7 @@ int      g_btOpen     = 0;
 int      g_btNoFill   = 0;
 double   g_btTotalR   = 0.0;
 double   g_btGrossWin = 0.0;   // sum of +R on winners (for profit factor)
+datetime g_btLastRun  = 0;     // throttle: the backtest pass is heavy, rerun sparingly
 
 MqlRates g_htf[];              // cached higher-timeframe bars (for as-of-time bias)
 bool     g_tradingHalted = false;  // on-chart STOP button: blocks NEW trades
@@ -240,8 +243,6 @@ int OnInit()
    g_useHTFBias        = InpUseHTFBias;
    g_useMSS            = InpUseMSS;
    g_useSweep          = InpUseLiquiditySweep;
-   g_sweepLookback     = InpSweepLookback;
-   g_sweepSwingBars    = InpSweepSwingBars;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
    g_beTriggerR        = InpBETriggerR;
@@ -251,8 +252,6 @@ int OnInit()
       g_useHTFBias        = false;          // trade both ways off M15 structure alone
       g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
       g_useSweep          = true;           // the sweep is THE confluence -- always required here
-      g_sweepLookback     = MathMax(InpSweepLookback, 96);  // reach back far enough to catch a MAJOR high swept much later
-      g_sweepSwingBars    = MathMax(InpSweepSwingBars, 8);  // only real swings count as swept liquidity, not noise
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
       g_beTriggerR        = InpScalpBETriggerR; // protect almost immediately
@@ -447,25 +446,6 @@ void ComputeHTFBias()                               // current bias, for the das
    HTFBiasAt(TimeCurrent(), g_htfUp, g_htfDown);
   }
 
-// Count how many inner swings have TAPPED a price level (within tol) across
-// [from,to]. A level touched by several swings is real resting liquidity
-// (equal highs / lows), not a one-off wiggle -- this is how we tell a genuine
-// liquidity pool from noise.
-int CountLiquidityTouches(const MqlRates &r[], int total, double level, bool isHigh,
-                          double tol, int from, int to)
-  {
-   int kt = 2;                                      // a minor swing = one touch
-   int c  = 0;
-   from = MathMax(from, kt);
-   to   = MathMin(to, total - kt - 1);
-   for(int i = from; i <= to; i++)
-     {
-      if(isHigh) { if(IsSwingHigh(r, i, kt) && MathAbs(r[i].high - level) <= tol) c++; }
-      else       { if(IsSwingLow (r, i, kt) && MathAbs(r[i].low  - level) <= tol) c++; }
-     }
-   return c;
-  }
-
 //+------------------------------------------------------------------+
 //| Confluence: a liquidity sweep before the inversion -- defined as a  |
 //| MAJOR structure level (a drawn Major HH/HL/LH/LL, from g_maj*)     |
@@ -524,7 +504,7 @@ bool CheckMSS(const MqlRates &r[], int total, bool bearish, int brk, int m,
               datetime &mssTime, double &mssLevel)
   {
    int k    = InpSwingBars;
-   int last = MathMin(total - k - 1, m + InpSweepLookback);
+   int last = MathMin(total - k - 1, m + 96);      // pivots up to ~96 bars before the gap
    for(int i = brk + 1; i <= last; i++)            // first structural pivot older than the break
      {
       if(bearish && IsSwingLow(r, i, k))
@@ -624,6 +604,12 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
    double minGap = InpMinGapATR  * atr;
    double buf    = InpSLBufferATR * atr;
 
+   // Spread used for the entry/SL/TP adjustments, capped at the effective
+   // spread limit so an abnormal weekend/news spread can't skew the levels.
+   double liveSpread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+   int    sprCapPts  = EffMaxSpreadPts();
+   if(sprCapPts > 0) liveSpread = MathMin(liveSpread, sprCapPts * _Point);
+
    // Major structure pivots for this window = the liquidity the sweep hunts for
    // (same detector as the drawn Major lines, so they match).
    ComputeMajorPivots(r, total, AtrFromRates(r, total, InpATRPeriod), g_majIdx, g_majPx, g_majHi);
@@ -718,7 +704,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // retest: the BOTTOM of the zone for a sell (price rallies up into
          // resistance), the TOP for a buy (price drops into support).
          // SL beyond the far extreme; TP at the next liquidity.
-         double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+         double spread = liveSpread;
          s.entry = bearish ? gapLow : gapHigh;
          // A BUY fills at Ask, so lift its entry by the spread to fill the instant
          // the Bid chart touches the zone top (a sell fills at Bid -> no change).
@@ -1477,8 +1463,16 @@ void Dashboard()
    else
      {
       string br = TradeBlockReason();
-      if(br == "") { autoTxt = "ON " + (InpEntryMode == ENTRY_MARKET_NOW ? "market" : "limit") + " lot " + DoubleToString(InpLotSize, 2)
-                               + (SpreadOK() ? "" : "  (spread>max)"); autoCol = SpreadOK() ? clrLime : clrOrange; }
+      if(br == "")
+        {
+         // show the lot the NEXT trade would actually use (risk-% sized when on)
+         double showLot = (InpRiskPercent > 0 && g_liveValid && g_liveSL > 0)
+                          ? LotForTrade(g_liveEntry, g_liveSL) : InpLotSize;
+         autoTxt = "ON " + (InpEntryMode == ENTRY_MARKET_NOW ? "market" : "limit")
+                   + " lot " + DoubleToString(showLot, 2)
+                   + (SpreadOK() ? "" : "  (spread>max)");
+         autoCol = SpreadOK() ? clrLime : clrOrange;
+        }
       else         { autoTxt = "BLOCKED: " + br;                          autoCol = clrTomato; }
      }
    SetVal("Auto", autoTxt, autoCol);
@@ -1507,9 +1501,18 @@ void Dashboard()
 //+------------------------------------------------------------------+
 void RunBacktest()
   {
-   g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0; g_btGrossWin = 0.0;
    if(!InpShowBacktest)
+     {
+      g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0; g_btGrossWin = 0.0;
       return;
+     }
+   // This pass re-runs detection over the whole backtest window (30 days) --
+   // too heavy for every M5 bar close. Refresh at most every 30 minutes; the
+   // stats it feeds (dashboard + win-odds) don't need per-bar precision.
+   if(g_btLastRun != 0 && TimeCurrent() - g_btLastRun < 1800)
+      return;
+   g_btLastRun = TimeCurrent();
+   g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0; g_btGrossWin = 0.0;
 
    MqlRates r[];
    ArraySetAsSeries(r, true);
@@ -1558,10 +1561,23 @@ void RunBacktest()
 //| and the terminal/account/symbol all allow trading (so it only acts |
 //| when the market is actually open and Algo Trading is enabled).     |
 //+------------------------------------------------------------------+
+// Session window in broker/server time. start > end wraps overnight.
+// Gates NEW entries only -- break-even and open-trade management run 24/5.
+bool InSession()
+  {
+   if(!InpUseSessionFilter) return true;
+   if(InpSessionStartHour == InpSessionEndHour) return true;    // degenerate = always on
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   if(InpSessionStartHour < InpSessionEndHour)
+      return (dt.hour >= InpSessionStartHour && dt.hour < InpSessionEndHour);
+   return (dt.hour >= InpSessionStartHour || dt.hour < InpSessionEndHour);
+  }
+
 // "" = clear to trade; otherwise the exact reason MT5 is blocking us.
 string TradeBlockReason()
   {
    if(g_tradingHalted)                                          return "stopped (Stop button)";
+   if(!InSession())                                             return "outside session hours";
    bool inTester = (bool)MQLInfoInteger(MQL_TESTER);
    if(!inTester && !TerminalInfoInteger(TERMINAL_CONNECTED))      return "no connection";
    if(!inTester && !(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return "Algo button OFF (toolbar)";
@@ -1683,12 +1699,24 @@ double DailyLossLimit()
    return 0.0;
   }
 
-// Cheap (uses cached stats): are we still under the daily caps?
+// Are we still under the daily caps? The loss limit counts realized P/L plus
+// any FLOATING LOSS on this EA's open trades (floating profit is ignored, so
+// an open winner can't unlock extra risk before it's banked).
 bool DailyLimitsOK()
   {
    if(InpMaxTradesPerDay > 0 && g_dayTrades >= InpMaxTradesPerDay) return false;
    double lim = DailyLossLimit();
-   if(lim > 0 && g_dayPL <= -lim) return false;
+   if(lim > 0)
+     {
+      double floating = 0.0;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         if(PositionGetTicket(i) == 0) continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol || (long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+         floating += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+        }
+      if(g_dayPL + MathMin(floating, 0.0) <= -lim) return false;
+     }
    return true;
   }
 
@@ -1939,10 +1967,10 @@ void Scan()
   {
    MqlRates r[];
    ArraySetAsSeries(r, true);                  // index 0 = newest
-   // Scan as far back as the backtest window so PAST IFVG zones are drawn too,
-   // not just the last few days -- the drawn zones then match what's evaluated.
-   int want = MathMax(HoursToBars(InpLookbackHours),
-                      (int)MathRound(InpBacktestDays * 24.0 * 3600.0 / PeriodSeconds(_Period)));
+   // Live scan window only (InpLookbackHours). The on-chart backtest covers its
+   // own longer window inside RunBacktest -- keeping them decoupled means this
+   // per-bar pass stays fast on low timeframes (M5).
+   int want  = HoursToBars(InpLookbackHours);
    int total = CopyRates(_Symbol, _Period, 1, want, r);   // from 1 = closed bars only
    if(total < 2 * InpSwingBars + 10)
       return;
@@ -2017,6 +2045,10 @@ void Scan()
              (g_liveBull ? "WATCHING BUY " : "WATCHING SELL ") + DoubleToString(g_liveEntry, _Digits) + " ",
              clrYellow, ANCHOR_RIGHT_LOWER);
      }
+
+   // Session close: pull unfilled limits so nothing fills overnight.
+   if(InpAutoTrade && InpUseSessionFilter && InpSessionCancelPend && !InSession())
+      CancelMyPendings();
 
    CancelCounterBias();
    ManageTrades(setups, n);
