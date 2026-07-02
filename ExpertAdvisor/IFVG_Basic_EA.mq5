@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.73"
-#property description "Inversion FVG scalper; run-and-reclaim sweeps (multi-candle takes)"
+#property version   "1.80"
+#property description "Inversion FVG scalper; Major-H/L-driven: sweep starts it, wick bounds it, next Major is the target"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -52,7 +52,14 @@ input double InpSweepMaxDistATR          = 3.0;         // Swept Major level mus
 input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the inversion candle (the sweep must be what CAUSED this reversal; 0 = no cap)
 input int    InpSweepReclaimBars         = 3;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (run-and-reclaim = swept; stays broken = CHoCH). 1 = same-candle only
 
+enum ENUM_SL_MODE
+  {
+   SL_SWEEP_EXTREME,   // Beyond the sweep's wick extreme (the structural invalidation point)
+   SL_GAP_EXTREME      // Beyond the gap's far edge (tighter, classic)
+  };
+
 input group "=== Trade levels ==="
+input ENUM_SL_MODE InpSLMode             = SL_SWEEP_EXTREME; // Stop placement: the trade is wrong exactly when the grab FAILS, so SL beyond the sweep wick = the premise's invalidation; gap-extreme is tighter but can sit inside the run
 input double InpMinRR                    = 2.0;         // Min reward:risk used for the fallback target
 input double InpMinRRFilter              = 1.0;         // QUALITY GATE: skip setups whose target is closer than this R:R (0 = take everything)
 input double InpSLBufferATR              = 0.10;        // SL buffer beyond the gap extreme (x ATR)
@@ -653,6 +660,33 @@ bool FindLiquidityTarget(const MqlRates &r[], int total, bool forLong, double en
    return false;
   }
 
+// Preferred target: the NEAREST untapped MAJOR level beyond entry -- the same
+// structure map that starts the play (a Major level swept) also names where
+// price is drawn to next. Falls back to minor swings, then the RR target.
+bool FindMajorTarget(const MqlRates &r[], int total, bool forLong, double entry, double &tp)
+  {
+   bool found = false; double best = 0.0;
+   int np = ArraySize(g_majPx);
+   for(int p = 0; p < np; p++)
+     {
+      int idx = g_majIdx[p]; double px = g_majPx[p];
+      if(forLong)
+        {
+         if(!g_majHi[p] || px <= entry) continue;
+         if(!UntappedHigh(r, idx, px))  continue;
+         if(!found || px < best) { best = px; found = true; }
+        }
+      else
+        {
+         if(g_majHi[p] || px >= entry)  continue;
+         if(!UntappedLow(r, idx, px))   continue;
+         if(!found || px > best) { best = px; found = true; }
+        }
+     }
+   if(found) tp = best;
+   return found;
+  }
+
 // Record the reason the freshest IFVG candidate per direction was rejected
 // (only the newest one per side, for the diagnostic).
 void RecReject(bool diag, bool bearish, string reason)
@@ -815,7 +849,14 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // the Bid chart touches the zone top (a sell fills at Bid -> no change).
          if(InpBuyEntrySpreadAdj && !bearish)
             s.entry += spread;
-         s.sl    = bearish ? gapHigh + buf : gapLow - buf;
+         // SL at the STRUCTURAL invalidation: the setup exists because a Major
+         // level was grabbed and rejected; it dies exactly when that grab's
+         // extreme is run through. Gap-extreme mode keeps the classic tighter stop.
+         if(InpSLMode == SL_SWEEP_EXTREME && hadSweep)
+            s.sl = bearish ? MathMax(gapHigh, swExtreme) + buf
+                           : MathMin(gapLow,  swExtreme) - buf;
+         else
+            s.sl = bearish ? gapHigh + buf : gapLow - buf;
 
          // SL floor: a thin zone gives a stop so tight that spread/noise kills
          // it (e.g. 0.6$ on gold). Widen to the ATR floor -- the risk-% lot
@@ -831,7 +872,9 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
            { RecReject(diag, bearish, "SL too wide"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "SL too wide"); continue; }
 
          double tp;
-         if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
+         if(FindMajorTarget(r, total, !bearish, s.entry, tp))       // structural draw: next untapped MAJOR level
+           { s.tp = tp; s.tpIsLiquidity = true; }
+         else if(FindLiquidityTarget(r, total, !bearish, s.entry, tp))
            { s.tp = tp; s.tpIsLiquidity = true; }
          else
            {
@@ -869,6 +912,22 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          s.withTrend = bearish ? tDown : tUp;
 
          RecReject(diag, bearish, "ok");        // passed all filters
+
+         // ONE setup per sweep event: a sweep's reversal leg is one play, so
+         // keep only its FIRST inversion -- the gap a hand would mark -- not
+         // every later gap that also references the same grab.
+         int replaceAt = -1; bool laterReaction = false;
+         if(s.hadSweep)
+            for(int q = 0; q < ArraySize(out); q++)
+              {
+               if(out[q].bullish != s.bullish || !out[q].hadSweep) continue;
+               if(out[q].sweepTime != s.sweepTime) continue;
+               if(out[q].breakTime <= s.breakTime) laterReaction = true;   // existing one reacted first
+               else                                 replaceAt = q;          // this one reacted first
+               break;
+              }
+         if(laterReaction) continue;
+         if(replaceAt >= 0) { out[replaceAt] = s; continue; }
 
          int sz = ArraySize(out); ArrayResize(out, sz + 1); out[sz] = s;
         }
