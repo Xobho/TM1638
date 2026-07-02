@@ -18,8 +18,8 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.62"
-#property description "Inversion FVG scalper; sweep must be near the zone in price AND time"
+#property version   "1.70"
+#property description "Inversion FVG scalper; evidence-based setup reliability (factor stats)"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -222,6 +222,11 @@ struct IFVGSetup
    double   rr;
    bool     tpIsLiquidity; // TP sits at a real untapped pool (a genuine draw) vs an RR fallback
    string   rejReason;     // "" if it passed; otherwise why it was filtered (for ghost zones)
+   // reliability features (feed the evidence-based odds + factor stats)
+   double   sweepDistATR;  // swept Major level's distance from the zone, in ATR (closer = cleaner)
+   double   gapATR;        // gap size in ATR (bigger displacement = stronger imbalance)
+   double   brkDispATR;    // inversion candle body in ATR (decisive vs marginal close-through)
+   bool     withTrend;     // aligned with the HTF structure trend at the break (measured, not filtered)
   };
 
 IFVGSetup g_ghosts[];      // rejected IFVG candidates (drawn faded, labelled with the reason)
@@ -232,6 +237,14 @@ IFVGSetup g_ghosts[];      // rejected IFVG candidates (drawn faded, labelled wi
 int    g_majIdx[];
 double g_majPx[];
 bool   g_majHi[];
+
+// Factor statistics: per reliability feature, historical wins/samples with the
+// feature true [1] vs false [0], filled by the backtest pass. This is what
+// tells us WHICH IFVGs are more reliable on this symbol+TF, from evidence.
+#define NFEAT 5
+int    g_ftWin[NFEAT][2];
+int    g_ftTot[NFEAT][2];
+string g_ftName[NFEAT] = {"swp","gap","brk","tp","trd"};
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -530,22 +543,47 @@ bool CheckMSS(const MqlRates &r[], int total, bool bearish, int brk, int m,
    return false;
   }
 
+// The binary reliability features of a setup, in g_ftName order:
+// swp = sweep close to the zone, gap = sizeable imbalance, brk = decisive
+// inversion candle, tp = target at real liquidity, trd = with the HTF trend.
+void SetupFeatures(const IFVGSetup &s, bool &f[])
+  {
+   f[0] = (s.sweepDistATR <= 1.5);
+   f[1] = (s.gapATR >= 0.5);
+   f[2] = (s.brkDispATR >= 0.7);
+   f[3] = s.tpIsLiquidity;
+   f[4] = s.withTrend;
+  }
+
 //+------------------------------------------------------------------+
-//| Rough win-probability for a setup. Two honest numbers:            |
+//| Win-probability for a setup. Two honest numbers:                  |
 //|  needPct = the break-even win rate this R:R demands (pure math,   |
 //|            = 100/(1+RR)) -- you must win MORE than this to profit. |
-//|  estPct  = an estimate of the actual win chance: the strategy's   |
-//|            historical win rate (once enough samples) nudged by    |
-//|            whether the TP sits at real untapped liquidity (a true  |
-//|            draw pulls price to target) vs an RR fallback.         |
+//|  estPct  = evidence-based: the strategy's historical win rate,     |
+//|            adjusted by how setups sharing THIS setup's features    |
+//|            actually performed (damped marginals from the factor    |
+//|            stats). Falls back to a crude nudge until enough        |
+//|            history has accumulated.                                |
 //+------------------------------------------------------------------+
 void SetupOdds(const IFVGSetup &s, double &estPct, double &needPct)
   {
    needPct = (s.rr > 0) ? 100.0 / (1.0 + s.rr) : 100.0;
    int    tot  = g_btWins + g_btLosses;
-   double base = (tot >= 10) ? (100.0 * g_btWins / tot) : 50.0;  // empirical edge once we have data
-   double factor = s.tpIsLiquidity ? 1.10 : 0.85;                // real draw vs no clear target
-   estPct = MathMax(5.0, MathMin(95.0, base * factor));
+   double base = (tot >= 10) ? (100.0 * g_btWins / tot) : 50.0;
+   double est  = base;
+   if(tot >= 10)
+     {
+      bool f[NFEAT]; SetupFeatures(s, f);
+      for(int q = 0; q < NFEAT; q++)
+        {
+         int b = f[q] ? 1 : 0;
+         if(g_ftTot[q][b] >= 8)                 // enough closed samples in this cell
+            est += 0.5 * (100.0 * g_ftWin[q][b] / g_ftTot[q][b] - base);   // damped marginal edge
+        }
+     }
+   else
+      est = base * (s.tpIsLiquidity ? 1.10 : 0.85);   // crude fallback until history builds
+   estPct = MathMax(5.0, MathMin(95.0, est));
   }
 
 string OddsGrade(double estPct, double needPct)
@@ -745,6 +783,18 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // Quality gate: reject setups whose target is too close to be worth it.
          if(InpMinRRFilter > 0 && s.rr < InpMinRRFilter)
            { RecReject(diag, bearish, "low R:R"); PushGhost(diag, bearish, s.gapLow, s.gapHigh, s.gapTime, s.breakTime, "low R:R"); continue; }
+
+         // Reliability features, for the evidence-based odds + factor stats.
+         s.gapATR       = (gapHigh - gapLow) / atr;
+         s.brkDispATR   = MathAbs(r[brk].close - r[brk].open) / atr;
+         s.sweepDistATR = 0.0;
+         if(hadSweep)
+           {
+            double d = bearish ? (swLevel - gapHigh) : (gapLow - swLevel);
+            s.sweepDistATR = MathMax(0.0, d) / atr;
+           }
+         bool tUp, tDown; HTFBiasAt(r[brk].time, tUp, tDown);
+         s.withTrend = bearish ? tDown : tUp;
 
          RecReject(diag, bearish, "ok");        // passed all filters
 
@@ -1314,17 +1364,17 @@ void Dashboard()
    int keyX = x + 8, valX = x + 124, contentY = yTop + headerH + 5;
 
    string sfx[]   = {"Sym","Mode","Bias","Mkt","Filt","Set","Diag",
-                     "SecBT","WL","WR","Net","OpenT",
+                     "SecBT","WL","WR","Net","OpenT","Fx",
                      "SecAcc","Eq","Pos","PL",
                      "SecDay","Day","DayTr","Risk",
                      "Auto","Live","Odds"};
    string left[]  = {"Symbol","Mode","HTF bias","Spread/ATR","Filters","Setups","Last IFVG",
-                     "--- BACKTEST ---","Win / Loss","Win rate","Net / PF","Open / no-fill",
+                     "--- BACKTEST ---","Win / Loss","Win rate","Net / PF","Open / no-fill","Factor edge",
                      "--- ACCOUNT ---","Equity / Bal","Pos / Pend","Float P/L",
                      "--- DAILY / RISK ---","Today P/L","Trades today","Risk / lot",
                      "Auto-trade","Live setup","Win odds"};
    bool   isSec[] = {false,false,false,false,false,false,false,
-                     true,false,false,false,false,
+                     true,false,false,false,false,false,
                      true,false,false,false,
                      true,false,false,false,
                      false,false,false};
@@ -1403,11 +1453,26 @@ void Dashboard()
       SetVal("WR",    DoubleToString(wr, 0) + "%   (" + IntegerToString(tot) + " trades)", wr >= 50 ? clrLime : clrGold);
       SetVal("Net",   StringFormat("%+.1fR   PF %s", g_btTotalR, (pf >= 999 ? "inf" : DoubleToString(pf, 2))), g_btTotalR >= 0 ? clrLime : clrTomato);
       SetVal("OpenT", IntegerToString(g_btOpen) + " open / " + IntegerToString(g_btNoFill) + " no-fill", clrSilver);
+
+      // Per-factor historical edge: win% WITH the feature minus win% WITHOUT.
+      // Positive = that trait made setups more reliable here. Needs samples
+      // on both sides before a factor shows.
+      string fx = "";
+      for(int q = 0; q < NFEAT; q++)
+         if(g_ftTot[q][0] >= 8 && g_ftTot[q][1] >= 8)
+           {
+            double d = 100.0 * g_ftWin[q][1] / g_ftTot[q][1]
+                     - 100.0 * g_ftWin[q][0] / g_ftTot[q][0];
+            fx += g_ftName[q] + StringFormat("%+.0f  ", d);
+           }
+      if(fx == "") fx = "building history...";
+      SetVal("Fx", fx, clrAqua);
      }
    else
      {
       SetVal("WL", "off", clrSilver); SetVal("WR", "-", clrSilver);
       SetVal("Net", "-", clrSilver);  SetVal("OpenT", "-", clrSilver);
+      SetVal("Fx", "-", clrSilver);
      }
 
    int pos, pend; double fpl; MyAccountStats(pos, pend, fpl);
@@ -1522,6 +1587,7 @@ void RunBacktest()
       return;
    g_btLastRun = TimeCurrent();
    g_btWins = 0; g_btLosses = 0; g_btOpen = 0; g_btNoFill = 0; g_btTotalR = 0.0; g_btGrossWin = 0.0;
+   ZeroMemory(g_ftWin); ZeroMemory(g_ftTot);
 
    MqlRates r[];
    ArraySetAsSeries(r, true);
@@ -1559,6 +1625,18 @@ void RunBacktest()
       if(oc == 1)      { g_btWins++;   g_btTotalR += sx[i].rr; g_btGrossWin += sx[i].rr; }
       else if(oc == -1){ g_btLosses++; g_btTotalR -= 1.0; }
       else               g_btOpen++;
+
+      // factor stats: which features the winners/losers actually had
+      if(oc != 0)
+        {
+         bool f[NFEAT]; SetupFeatures(sx[i], f);
+         for(int q = 0; q < NFEAT; q++)
+           {
+            int b = f[q] ? 1 : 0;
+            g_ftTot[q][b]++;
+            if(oc == 1) g_ftWin[q][b]++;
+           }
+        }
      }
   }
 
