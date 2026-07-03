@@ -18,19 +18,19 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.95"
+#property version   "1.96"
 #property description "Inversion FVG scalper; simple touch-sweep + Tier 1/2/3 quality gate"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.95"
+#define EA_VER "1.96"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
 
 //=== Inputs ==========================================================
 input group "=== Scalp mode ==="
-input bool   InpScalpMode                 = true;        // ON: pure M15 in-and-out -- ignores HTF bias, fixed tight target, fast break-even, no TP chasing. Overrides the settings below at startup.
+input bool   InpScalpMode                 = true;        // ON: pure chart-TF in-and-out (any TF, M1 included) -- ignores HTF bias, fixed tight target, fast break-even, no TP chasing. Overrides the settings below at startup.
 input double InpScalpRR                    = 1.5;         // Scalp target reward:risk (used when Scalp mode is ON)
 input double InpScalpBETriggerR           = 1.0;         // Scalp break-even trigger, in R (1.0 = move SL to entry once trade is +1:1; used when Scalp mode is ON)
 
@@ -107,7 +107,8 @@ input double InpMajorMoveATR             = 0.0;         // 0 = FRACTAL-swing maj
 input int    InpMajorPivotBars           = 4;           // ATR-zigzag only: a pivot must also be a fractal swing (this many bars each side)
 input int    InpMajorSwingBars           = 12;          // FRACTAL majors: swing strength (bars each side). Bigger = fewer, more major. THE dial for fractal mode
 input double InpMajorDays                 = 10.0;        // Draw major levels going back at least this many days
-input bool   InpMajorUntappedOnly        = true;        // Draw only UNTAPPED Major levels (the live liquidity shelf); tapped ones are spent -- recent grabs still show as 'swept' arrows
+// NOTE: every Major in the window is drawn -- tapped ones simply END at the
+// candle that first cut them (first touch), untapped ones run to the live bar.
 input int    InpMaxMajorLines            = 4;           // (legacy) max major lines per side -- ignored; the days window governs
 input color  InpMajorStructColor         = clrBlue;     // Major-structure level color
 input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
@@ -126,9 +127,6 @@ input int    InpIntSwingBars             = 3;           // Swing strength for IN
 input int    InpMaxLiqLines              = 8;           // Max lines per type/side (anti-clutter)
 input color  InpExtLiqColor              = clrOrangeRed;
 input color  InpIntLiqColor              = clrSlateGray;
-input bool   InpShowMainLiq              = true;        // MAIN liquidity: session/day/week key levels everyone watches (PDH/PDL, PWH/PWL, today's H/L) -- the primary draws
-input bool   InpShowDayHL                = true;        // Also show today's developing high/low
-input color  InpMainLiqColor             = clrGold;     // Main-liquidity level color
 input bool   InpShowRangeLevels          = true;        // RANGE liquidity: high & low of consolidations (flat shelves where price bases then breaks) -- horizontal pools the swing zigzag misses
 input int    InpRangeMinBars             = 12;          // A consolidation must last at least this many bars
 input double InpRangeMaxATR              = 2.0;         // ...and its whole high-low span must stay within this x ATR (tighter = only clean bases)
@@ -1530,7 +1528,6 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
       if(pHi[p])
         {
          for(int j = i - 1; j >= 0; j--) if(rr[j].high >= lvl) { end = rr[j].time; break; }
-         if(InpMajorUntappedOnly && end != tNow) continue;   // tapped = spent -> keep the shelf clean
          string nm = PFX + "MS_MAJH_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
          TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
@@ -1538,7 +1535,6 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
       else
         {
          for(int j = i - 1; j >= 0; j--) if(rr[j].low <= lvl) { end = rr[j].time; break; }
-         if(InpMajorUntappedOnly && end != tNow) continue;
          string nm = PFX + "MS_MAJL_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
          TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
@@ -1638,45 +1634,8 @@ void DrawLiquidity(const MqlRates &r[], int total)
       DrawPools(r, total, InpIntSwingBars, InpExtSwingBars, InpIntLiqColor, "", "", 1, STYLE_DOT);
   }
 
-// One MAIN-liquidity level: a full-width horizontal line (fixed name -> updates
-// in place, no accumulation) + a right-edge label. Tapped once price trades
-// through it, so a still-untapped key level stands out solid vs a dotted spent one.
-void MainLine(string suffix, double price, string label, bool tapped)
-  {
-   string nm = PFX + "ML_" + suffix;
-   if(ObjectFind(0, nm) < 0) ObjectCreate(0, nm, OBJ_HLINE, 0, 0, price);
-   ObjectSetDouble (0, nm, OBJPROP_PRICE, price);
-   ObjectSetInteger(0, nm, OBJPROP_COLOR, InpMainLiqColor);
-   ObjectSetInteger(0, nm, OBJPROP_STYLE, tapped ? STYLE_DOT : STYLE_DASH);
-   ObjectSetInteger(0, nm, OBJPROP_WIDTH, tapped ? 1 : 2);
-   ObjectSetInteger(0, nm, OBJPROP_BACK, false);
-   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
-   TextAt(nm + "t", iTime(_Symbol, _Period, 0), price, " " + label + (tapped ? " (tapped)" : ""),
-          InpMainLiqColor, ANCHOR_LEFT);
-  }
-
-//+------------------------------------------------------------------+
-//| MAIN liquidity: the objective session/day/week key levels every   |
-//| trader watches -- the primary draws on liquidity, independent of  |
-//| the relative ATR-zigzag Major structure.                          |
-//+------------------------------------------------------------------+
-void DrawMainLiquidity()
-  {
-   if(!InpShowMainLiq) return;
-   double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double pdh = iHigh(_Symbol, PERIOD_D1, 1), pdl = iLow(_Symbol, PERIOD_D1, 1);
-   double pwh = iHigh(_Symbol, PERIOD_W1, 1), pwl = iLow(_Symbol, PERIOD_W1, 1);
-   if(pdh > 0) MainLine("PDH", pdh, "PDH", bid > pdh);   // above it = buy-side liq taken
-   if(pdl > 0) MainLine("PDL", pdl, "PDL", bid < pdl);
-   if(pwh > 0) MainLine("PWH", pwh, "PWH", bid > pwh);
-   if(pwl > 0) MainLine("PWL", pwl, "PWL", bid < pwl);
-   if(InpShowDayHL)
-     {
-      double dh = iHigh(_Symbol, PERIOD_D1, 0), dl = iLow(_Symbol, PERIOD_D1, 0);
-      if(dh > 0) MainLine("DH", dh, "Day H", false);
-      if(dl > 0) MainLine("DL", dl, "Day L", false);
-     }
-  }
+// (MAIN-liquidity gold PDH/PDL/PWH/PWL/Day-H/L lines removed -- they cluttered
+//  the chart as full-width horizontals. The ML_ wipe in Scan clears leftovers.)
 
 //+------------------------------------------------------------------+
 //| RANGE liquidity: the high & low of consolidations (flat shelves   |
@@ -1873,10 +1832,10 @@ void Dashboard()
    long   spr = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
    SetVal("Sym",  _Symbol + "  " + ShortTF((ENUM_TIMEFRAMES)_Period), clrWhite);
-   SetVal("Mode", (InpScalpMode ? "SCALP (M15 in/out)" : "Positional (HTF)")
+   SetVal("Mode", (InpScalpMode ? "SCALP (" + ShortTF((ENUM_TIMEFRAMES)_Period) + " in/out)" : "Positional (HTF)")
                   + StringFormat("  RR>=%.1f  BE %.1fR", g_minRR, (InpBreakEven ? g_beTriggerR : 0.0)),
                   InpScalpMode ? clrGold : clrAqua);
-   SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP M15)" : " (" + ShortTF(InpHTF) + ")"), biasCol);
+   SetVal("Bias", biasTxt + (InpScalpMode ? " (SCALP " + ShortTF((ENUM_TIMEFRAMES)_Period) + ")" : " (" + ShortTF(InpHTF) + ")"), biasCol);
    int    sprCap = EffMaxSpreadPts();
    string sprTxt = "spread " + IntegerToString((int)spr) + (sprCap > 0 ? "/" + IntegerToString(sprCap) : "/-")
                    + " pts   ATR " + DoubleToString(atr, _Digits);
@@ -2040,6 +1999,7 @@ void RunBacktest()
    MqlRates r[];
    ArraySetAsSeries(r, true);
    int want  = (int)MathMax(1.0, MathRound(InpBacktestDays * 24.0 * 3600.0 / PeriodSeconds(_Period)));
+   want      = (int)MathMin(20000.0, (double)want);   // bar cap so low TFs (M1: 30 days = 43k bars) don't stall the chart thread
    int total = CopyRates(_Symbol, _Period, 1, want, r);
    if(total < 2 * InpSwingBars + 10)
       return;
@@ -2508,6 +2468,7 @@ void Scan()
    // own longer window inside RunBacktest -- keeping them decoupled means this
    // per-bar pass stays fast on low timeframes (M5).
    int want  = HoursToBars(InpLookbackHours);
+   want      = (int)MathMin(5000.0, (double)want);        // bar cap: on M1 the scan runs every minute -- keep it light (120h would be 7200 bars)
    int total = CopyRates(_Symbol, _Period, 1, want, r);   // from 1 = closed bars only
    if(total < 2 * InpSwingBars + 10)
       return;
@@ -2524,10 +2485,9 @@ void Scan()
       ObjectsDeleteAll(0, PFX + "MS_");
       ObjectsDeleteAll(0, PFX + "LQ_");
       ObjectsDeleteAll(0, PFX + "G");      // ghost (rejected) zones
-      ObjectsDeleteAll(0, PFX + "ML_");    // main-liquidity levels
+      ObjectsDeleteAll(0, PFX + "ML_");    // main-liquidity levels (removed feature; clears leftovers)
       ObjectsDeleteAll(0, PFX + "RG_");    // range/consolidation levels
       DrawLiquidity(r, total);
-      DrawMainLiquidity();                     // PDH/PDL/PWH/PWL + day H/L (the primary draws)
       DrawRangeLevels();                       // consolidation high/low shelves
       DrawStructure(total);
       DrawSweeps();                            // mark every swept Major (structural confirmation)
