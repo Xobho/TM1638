@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.91"
+#property version   "1.92"
 #property description "Inversion FVG scalper; simple touch-sweep + Tier 1/2/3 quality gate"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.91"
+#define EA_VER "1.92"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -1322,7 +1322,7 @@ void DrawSweeps()
             // arrow is never orphaned -- you see the exact line that got swept
             // (its own line may be hidden by the untapped-only filter).
             datetime tL = r[idx].time;
-            datetime tR = r[extIdx].time + (datetime)(PeriodSeconds(_Period) * 6);
+            datetime tR = r[extIdx].time;               // stop at the first-touch candle -- the take -- don't extend past it
             HLine(nm + "L", tL, tR, level, InpSweepColor, STYLE_DOT, 1);
             ArrowAt(nm + "A", r[extIdx].time, ext, isHigh ? 234 : 233, InpSweepColor,
                     isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
@@ -1588,18 +1588,6 @@ bool UntappedLow(const MqlRates &r[], int i, double level)
    return true;
   }
 
-void LiqLine(string name, datetime t1, datetime t2, double price, color c, int style, int width)
-  {
-   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-   if(!ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price)) return;
-   ObjectSetInteger(0, name, OBJPROP_COLOR, c);
-   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
-   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);   // extend to the right = a live target
-   ObjectSetInteger(0, name, OBJPROP_BACK, false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-  }
-
 //+------------------------------------------------------------------+
 //| Draw untapped swing pools at strength k. excludeK>0 skips pivots  |
 //| that are ALSO pivots at the larger strength (so internal lines    |
@@ -1619,7 +1607,7 @@ void DrawPools(const MqlRates &r[], int total, int k, int excludeK, color c,
          if(UntappedHigh(r, i, lvl))
            {
             string nm = PFX + "LQ_H" + IntegerToString(width) + "_" + IntegerToString((int)r[i].time);
-            LiqLine(nm, r[i].time, tNow, lvl, c, style, width);
+            HLine(nm, r[i].time, tNow, lvl, c, style, width);   // untapped -> ends at the live bar, no ray past it
             if(tagHi != "") TextAt(nm + "t", r[i].time, lvl, tagHi + " ", c, ANCHOR_RIGHT_LOWER);
             drawnH++;
            }
@@ -1631,7 +1619,7 @@ void DrawPools(const MqlRates &r[], int total, int k, int excludeK, color c,
          if(UntappedLow(r, i, lvl))
            {
             string nm = PFX + "LQ_L" + IntegerToString(width) + "_" + IntegerToString((int)r[i].time);
-            LiqLine(nm, r[i].time, tNow, lvl, c, style, width);
+            HLine(nm, r[i].time, tNow, lvl, c, style, width);   // untapped -> ends at the live bar, no ray past it
             if(tagLo != "") TextAt(nm + "t", r[i].time, lvl, tagLo + " ", c, ANCHOR_RIGHT_UPPER);
             drawnL++;
            }
@@ -1670,7 +1658,7 @@ void DrawEqualHL(const MqlRates &r[], int total, double atr)
          if(dup) continue;
 
          // count every swing of this type within tol of the level (the cluster)
-         int touches = 0; double edge = lvl; int oldest = i;
+         int touches = 0; double edge = lvl; int oldest = i; int newest = i;
          for(int j = k; j < total - k; j++)
            {
             bool jp = isHigh ? IsSwingHigh(r, j, k) : IsSwingLow(r, j, k);
@@ -1679,12 +1667,20 @@ void DrawEqualHL(const MqlRates &r[], int total, double atr)
             if(MathAbs(jl - lvl) > tol) continue;
             touches++;
             if(j > oldest) oldest = j;                 // furthest-back touch (line start)
+            if(j < newest) newest = j;                 // most recent touch (where a later sweep begins)
             if(isHigh ? (jl > edge) : (jl < edge)) edge = jl;   // outer edge = where stops sit
            }
          if(touches < 2) continue;                     // need a real cluster
 
+         // Terminate the shelf at the FIRST candle that reaches the edge after the
+         // last equal touch -- a taken level stops being live liquidity right
+         // there, so the line ends at the sweep instead of projecting on forever.
+         datetime endT = tNow;
+         for(int j = newest - 1; j >= 0; j--)
+            if(isHigh ? (r[j].high >= edge) : (r[j].low <= edge)) { endT = r[j].time; break; }
+
          string nm = PFX + "LQ_EQ" + (isHigh ? "H_" : "L_") + IntegerToString((int)r[i].time);
-         LiqLine(nm, r[oldest].time, tNow, edge, InpEqualLiqColor, STYLE_SOLID, 2);
+         HLine(nm, r[oldest].time, endT, edge, InpEqualLiqColor, STYLE_SOLID, 2);
          TextAt(nm + "t", r[oldest].time, edge, (isHigh ? "EQH x" : "EQL x") + IntegerToString(touches) + " ",
                 InpEqualLiqColor, isHigh ? ANCHOR_RIGHT_LOWER : ANCHOR_RIGHT_UPPER);
          int s = ArraySize(drawnLv); ArrayResize(drawnLv, s + 1); drawnLv[s] = lvl;
