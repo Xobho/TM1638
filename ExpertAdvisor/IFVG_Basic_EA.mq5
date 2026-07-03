@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.84"
-#property description "Inversion FVG scalper; multi-pool sweep strength (stacked Major levels taken)"
+#property version   "1.85"
+#property description "Inversion FVG scalper; main liquidity levels (PDH/PDL/PWH/PWL)"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.84"
+#define EA_VER "1.85"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -120,6 +120,9 @@ input int    InpMaxLiqLines              = 8;           // Max lines per type/si
 input color  InpExtLiqColor              = clrOrangeRed;
 input color  InpIntLiqColor              = clrSlateGray;
 input color  InpEqualLiqColor            = clrMediumOrchid;
+input bool   InpShowMainLiq              = true;        // MAIN liquidity: session/day/week key levels everyone watches (PDH/PDL, PWH/PWL, today's H/L) -- the primary draws
+input bool   InpShowDayHL                = true;        // Also show today's developing high/low
+input color  InpMainLiqColor             = clrGold;     // Main-liquidity level color
 
 input group "=== Backtest (on-chart win/loss) ==="
 input bool   InpShowBacktest             = true;        // Tally TP-vs-SL outcomes across the window
@@ -1527,6 +1530,46 @@ void DrawLiquidity(const MqlRates &r[], int total)
       DrawEqualHL(r, total, GetATR());
   }
 
+// One MAIN-liquidity level: a full-width horizontal line (fixed name -> updates
+// in place, no accumulation) + a right-edge label. Tapped once price trades
+// through it, so a still-untapped key level stands out solid vs a dotted spent one.
+void MainLine(string suffix, double price, string label, bool tapped)
+  {
+   string nm = PFX + "ML_" + suffix;
+   if(ObjectFind(0, nm) < 0) ObjectCreate(0, nm, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble (0, nm, OBJPROP_PRICE, price);
+   ObjectSetInteger(0, nm, OBJPROP_COLOR, InpMainLiqColor);
+   ObjectSetInteger(0, nm, OBJPROP_STYLE, tapped ? STYLE_DOT : STYLE_DASH);
+   ObjectSetInteger(0, nm, OBJPROP_WIDTH, tapped ? 1 : 2);
+   ObjectSetInteger(0, nm, OBJPROP_BACK, false);
+   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+   TextAt(nm + "t", iTime(_Symbol, _Period, 0), price, " " + label + (tapped ? " (tapped)" : ""),
+          InpMainLiqColor, ANCHOR_LEFT);
+  }
+
+//+------------------------------------------------------------------+
+//| MAIN liquidity: the objective session/day/week key levels every   |
+//| trader watches -- the primary draws on liquidity, independent of  |
+//| the relative ATR-zigzag Major structure.                          |
+//+------------------------------------------------------------------+
+void DrawMainLiquidity()
+  {
+   if(!InpShowMainLiq) return;
+   double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double pdh = iHigh(_Symbol, PERIOD_D1, 1), pdl = iLow(_Symbol, PERIOD_D1, 1);
+   double pwh = iHigh(_Symbol, PERIOD_W1, 1), pwl = iLow(_Symbol, PERIOD_W1, 1);
+   if(pdh > 0) MainLine("PDH", pdh, "PDH", bid > pdh);   // above it = buy-side liq taken
+   if(pdl > 0) MainLine("PDL", pdl, "PDL", bid < pdl);
+   if(pwh > 0) MainLine("PWH", pwh, "PWH", bid > pwh);
+   if(pwl > 0) MainLine("PWL", pwl, "PWL", bid < pwl);
+   if(InpShowDayHL)
+     {
+      double dh = iHigh(_Symbol, PERIOD_D1, 0), dl = iLow(_Symbol, PERIOD_D1, 0);
+      if(dh > 0) MainLine("DH", dh, "Day H", false);
+      if(dl > 0) MainLine("DL", dl, "Day L", false);
+     }
+  }
+
 //+------------------------------------------------------------------+
 //| Dashboard                                                         |
 //+------------------------------------------------------------------+
@@ -2302,7 +2345,9 @@ void Scan()
       ObjectsDeleteAll(0, PFX + "MS_");
       ObjectsDeleteAll(0, PFX + "LQ_");
       ObjectsDeleteAll(0, PFX + "G");      // ghost (rejected) zones
+      ObjectsDeleteAll(0, PFX + "ML_");    // main-liquidity levels
       DrawLiquidity(r, total);
+      DrawMainLiquidity();                     // PDH/PDL/PWH/PWL + day H/L (the primary draws)
       DrawStructure(total);
       DrawSweeps();                            // mark every swept Major (structural confirmation)
      }
