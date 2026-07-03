@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.87"
-#property description "Inversion FVG scalper; simple sweep = ANY Major line taken"
+#property version   "1.88"
+#property description "Inversion FVG scalper; every sweep draws its Major level line (no orphan arrows)"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.87"
+#define EA_VER "1.88"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -1174,10 +1174,16 @@ void DrawSweeps()
          if(rec >= 0 && depthOK)                        // grabbed + reclaimed + shallow = swept
            {
             string nm = PFX + "SW_" + IntegerToString((int)r[extIdx].time);
-            ArrowAt(nm, r[extIdx].time, ext, isHigh ? 234 : 233, InpSweepColor,
+            // Draw the Major LEVEL that was taken, right at the grab, so the
+            // arrow is never orphaned -- you see the exact line that got swept
+            // (its own line may be hidden by the untapped-only filter).
+            datetime tL = r[idx].time;
+            datetime tR = r[extIdx].time + (datetime)(PeriodSeconds(_Period) * 6);
+            HLine(nm + "L", tL, tR, level, InpSweepColor, STYLE_DOT, 1);
+            ArrowAt(nm + "A", r[extIdx].time, ext, isHigh ? 234 : 233, InpSweepColor,
                     isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
-            TextAt(nm + "t", r[extIdx].time, ext, " swept", InpSweepColor,
-                   isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+            TextAt(nm + "t", r[extIdx].time, ext, " swept " + DoubleToString(level, _Digits),
+                   InpSweepColor, isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
             drawn++;
            }
          break;                                         // first reach handled either way
