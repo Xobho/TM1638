@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.89"
-#property description "Inversion FVG scalper; range/consolidation liquidity levels"
+#property version   "1.90"
+#property description "Inversion FVG scalper; fractal-swing majors + clustered equal H/L"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.89"
+#define EA_VER "1.90"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -97,9 +97,9 @@ input int    InpMaxStructBreaks          = 6;           // Draw only the most re
 input color  InpBOSColor                 = clrGray;     // Break of Structure (continuation)
 input color  InpCHoCHColor               = clrOrange;   // Change of Character (reversal)
 input bool   InpShowMajorStruct          = true;        // Mark MAJOR structure: big swing highs/lows as horizontal level lines
-input double InpMajorMoveATR             = 2.5;         // MAJOR level = a swing after price reversed >= this x ATR (significance; auto-scales per TF; bigger = fewer, only the biggest). 0 = use bar-count strength
-input int    InpMajorPivotBars           = 4;           // A major pivot must also be a real fractal swing (this many lower/higher bars each side); bigger = only clean swings
-input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
+input double InpMajorMoveATR             = 0.0;         // 0 = FRACTAL-swing majors (deterministic: highest of InpMajorSwingBars each side -- default, forced in scalp). >0 = ATR-zigzag (reverses this x ATR)
+input int    InpMajorPivotBars           = 4;           // ATR-zigzag only: a pivot must also be a fractal swing (this many bars each side)
+input int    InpMajorSwingBars           = 12;          // FRACTAL majors: swing strength (bars each side). Bigger = fewer, more major. THE dial for fractal mode
 input double InpMajorDays                 = 10.0;        // Draw major levels going back at least this many days
 input bool   InpMajorUntappedOnly        = true;        // Draw only UNTAPPED Major levels (the live liquidity shelf); tapped ones are spent -- recent grabs still show as 'swept' arrows
 input int    InpMaxMajorLines            = 4;           // (legacy) max major lines per side -- ignored; the days window governs
@@ -115,7 +115,7 @@ input group "=== Liquidity lines ==="
 input bool   InpShowLiquidity            = true;        // Draw untapped liquidity pools
 input bool   InpShowExternal             = true;        // External liquidity = MAJOR swing pools (BSL/SSL)
 input bool   InpShowInternal             = false;       // Internal liquidity = MINOR swing pools inside the range (noise for this method; off = clean)
-input bool   InpShowEqualHL              = false;       // Equal highs / lows (clustered stops; off = clean)
+input bool   InpShowEqualHL              = true;        // Equal highs / lows: levels tapped by 2+ swings within tolerance (clustered stops = strongest pools)
 input int    InpExtSwingBars             = 10;          // Swing strength for EXTERNAL (major) pools
 input int    InpIntSwingBars             = 3;           // Swing strength for INTERNAL (minor) pools
 input double InpEqualTolATR              = 0.10;        // Equal-HL tolerance as a multiple of ATR
@@ -181,6 +181,7 @@ bool     g_useHTFBias       = true;
 bool     g_useMSS           = false;
 bool     g_useSweep         = true;
 bool     g_sweepExternal    = false;
+double   g_majorMoveATR     = 0.0;     // 0 = fractal-swing majors (deterministic); >0 = ATR-zigzag
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
 double   g_beTriggerR       = 1.0;
@@ -289,6 +290,7 @@ int OnInit()
    g_useMSS            = InpUseMSS;
    g_useSweep          = InpUseLiquiditySweep;
    g_sweepExternal     = InpSweepExternalOnly;
+   g_majorMoveATR      = InpMajorMoveATR;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
    g_beTriggerR        = InpBETriggerR;
@@ -299,6 +301,7 @@ int OnInit()
       g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
       g_useSweep          = true;           // the sweep is THE confluence -- always required here
       g_sweepExternal     = false;          // ANY Major line taken = the sweep (simple rule)
+      g_majorMoveATR      = 0.0;            // fractal-swing majors (deterministic), not the ATR-zigzag
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
       g_beTriggerR        = MathMax(InpScalpBETriggerR, 1.0); // BE no earlier than +1R (a stale saved input can't lower it; raising above 1 is allowed)
@@ -1316,9 +1319,9 @@ void ComputeMajorPivots(const MqlRates &rr[], int total, double atr,
   {
    ArrayResize(pIdx, 0); ArrayResize(pPx, 0); ArrayResize(pHi, 0);
    if(total < 10) return;
-   if(InpMajorMoveATR > 0.0 && atr > 0.0)
+   if(g_majorMoveATR > 0.0 && atr > 0.0)
      {
-      double thresh = InpMajorMoveATR * atr;
+      double thresh = g_majorMoveATR * atr;
       double curHi = rr[total - 1].high; int curHiIdx = total - 1;
       double curLo = rr[total - 1].low;  int curLoIdx = total - 1;
       int    dir   = 0;
@@ -1500,57 +1503,55 @@ void DrawPools(const MqlRates &r[], int total, int k, int excludeK, color c,
   }
 
 //+------------------------------------------------------------------+
-//| Equal highs / lows: two adjacent same-type swings within an ATR   |
-//| tolerance = a clean stop cluster. Drawn only while still untapped. |
+//| Equal highs / lows: a level TAPPED by 2+ swings within tolerance   |
+//| = a real stop cluster (the strongest resting liquidity). Cluster-  |
+//| based (not just adjacent pairs): counts every swing near the level,|
+//| labels the count 'EQH x3', dedupes overlapping clusters, untapped. |
 //+------------------------------------------------------------------+
 void DrawEqualHL(const MqlRates &r[], int total, double atr)
   {
    double tol = InpEqualTolATR * atr;
    if(tol <= 0.0) return;
-   int k = InpIntSwingBars;
+   int      k = InpIntSwingBars;
    datetime tNow = r[0].time;
 
-   int drawn = 0;
-   for(int i = k; i < total - k && drawn < InpMaxLiqLines; i++)   // equal HIGHS
+   for(int side = 0; side < 2; side++)                 // 0 = highs, 1 = lows
      {
-      if(!IsSwingHigh(r, i, k)) continue;
-      for(int j = i + k; j < total - k; j++)
+      bool   isHigh = (side == 0);
+      double drawnLv[]; int drawn = 0;                 // dedupe already-drawn cluster levels
+      for(int i = k; i < total - k && drawn < InpMaxLiqLines; i++)
         {
-         if(!IsSwingHigh(r, j, k)) continue;                       // nearest older swing high
-         if(MathAbs(r[j].high - r[i].high) <= tol)
-           {
-            double y = MathMax(r[i].high, r[j].high);
-            if(UntappedHigh(r, i, y))
-              {
-               string nm = PFX + "LQ_EQH_" + IntegerToString((int)r[i].time);
-               LiqLine(nm, r[j].time, tNow, y, InpEqualLiqColor, STYLE_SOLID, 1);
-               TextAt(nm + "t", r[i].time, y, "EQH ", InpEqualLiqColor, ANCHOR_LEFT_LOWER);
-               drawn++;
-              }
-           }
-         break;
-        }
-     }
+         bool piv = isHigh ? IsSwingHigh(r, i, k) : IsSwingLow(r, i, k);
+         if(!piv) continue;
+         double lvl = isHigh ? r[i].high : r[i].low;
+         bool untapped = isHigh ? UntappedHigh(r, i, lvl) : UntappedLow(r, i, lvl);
+         if(!untapped) continue;
 
-   drawn = 0;
-   for(int i = k; i < total - k && drawn < InpMaxLiqLines; i++)   // equal LOWS
-     {
-      if(!IsSwingLow(r, i, k)) continue;
-      for(int j = i + k; j < total - k; j++)
-        {
-         if(!IsSwingLow(r, j, k)) continue;
-         if(MathAbs(r[j].low - r[i].low) <= tol)
+         bool dup = false;                             // skip if near a cluster we already drew
+         for(int d = 0; d < ArraySize(drawnLv); d++)
+            if(MathAbs(drawnLv[d] - lvl) <= tol) { dup = true; break; }
+         if(dup) continue;
+
+         // count every swing of this type within tol of the level (the cluster)
+         int touches = 0; double edge = lvl; int oldest = i;
+         for(int j = k; j < total - k; j++)
            {
-            double y = MathMin(r[i].low, r[j].low);
-            if(UntappedLow(r, i, y))
-              {
-               string nm = PFX + "LQ_EQL_" + IntegerToString((int)r[i].time);
-               LiqLine(nm, r[j].time, tNow, y, InpEqualLiqColor, STYLE_SOLID, 1);
-               TextAt(nm + "t", r[i].time, y, "EQL ", InpEqualLiqColor, ANCHOR_LEFT_UPPER);
-               drawn++;
-              }
+            bool jp = isHigh ? IsSwingHigh(r, j, k) : IsSwingLow(r, j, k);
+            if(!jp) continue;
+            double jl = isHigh ? r[j].high : r[j].low;
+            if(MathAbs(jl - lvl) > tol) continue;
+            touches++;
+            if(j > oldest) oldest = j;                 // furthest-back touch (line start)
+            if(isHigh ? (jl > edge) : (jl < edge)) edge = jl;   // outer edge = where stops sit
            }
-         break;
+         if(touches < 2) continue;                     // need a real cluster
+
+         string nm = PFX + "LQ_EQ" + (isHigh ? "H_" : "L_") + IntegerToString((int)r[i].time);
+         LiqLine(nm, r[oldest].time, tNow, edge, InpEqualLiqColor, STYLE_SOLID, 2);
+         TextAt(nm + "t", r[oldest].time, edge, (isHigh ? "EQH x" : "EQL x") + IntegerToString(touches) + " ",
+                InpEqualLiqColor, isHigh ? ANCHOR_RIGHT_LOWER : ANCHOR_RIGHT_UPPER);
+         int s = ArraySize(drawnLv); ArrayResize(drawnLv, s + 1); drawnLv[s] = lvl;
+         drawn++;
         }
      }
   }
