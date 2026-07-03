@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.86"
-#property description "Inversion FVG scalper; external liquidity only -- clean chart, range-extreme sweeps"
+#property version   "1.87"
+#property description "Inversion FVG scalper; simple sweep = ANY Major line taken"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.86"
+#define EA_VER "1.87"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -57,7 +57,7 @@ input int    InpSweepMaxBarsBack         = 24;          // The grab must happen 
 input int    InpSweepReclaimBars         = 8;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (a slow flush is still a grab; scalp forces >=8). 1 = same-candle only
 input double InpSweepMaxDepthATR         = 1.5;         // Max flush depth BEYOND the level (x ATR): shallow = stop-hunt (swept), deep = breakdown (not a grab). This, not time, guards against fading real breakouts (0 = off)
 input int    InpMinSweepPools            = 1;           // Require the sweep run to take out >= this many stacked Major levels (2+ = only strong, multi-pool grabs; 1 = any). Watch the 'mlt' factor edge first, then raise
-input bool   InpSweepExternalOnly        = true;        // Sweep must take EXTERNAL liquidity: the level must be the range extreme (nothing beyond it recently) -- internal pools inside the range are noise
+input bool   InpSweepExternalOnly        = false;       // Sweep must take EXTERNAL liquidity (range extreme only). OFF = ANY Major line taken counts as the sweep (simpler). Scalp forces OFF
 input int    InpExternalBars             = 48;          // 'External' window: no higher high (lower low) within this many bars before the grab
 
 enum ENUM_SL_MODE
@@ -176,6 +176,7 @@ input double InpDailyLossLimitUSD        = 5.0;         // Stop new trades after
 bool     g_useHTFBias       = true;
 bool     g_useMSS           = false;
 bool     g_useSweep         = true;
+bool     g_sweepExternal    = false;
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
 double   g_beTriggerR       = 1.0;
@@ -283,6 +284,7 @@ int OnInit()
    g_useHTFBias        = InpUseHTFBias;
    g_useMSS            = InpUseMSS;
    g_useSweep          = InpUseLiquiditySweep;
+   g_sweepExternal     = InpSweepExternalOnly;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
    g_beTriggerR        = InpBETriggerR;
@@ -292,6 +294,7 @@ int OnInit()
       g_useHTFBias        = false;          // trade both ways off M15 structure alone
       g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
       g_useSweep          = true;           // the sweep is THE confluence -- always required here
+      g_sweepExternal     = false;          // ANY Major line taken = the sweep (simple rule)
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
       g_beTriggerR        = MathMax(InpScalpBETriggerR, 1.0); // BE no earlier than +1R (a stale saved input can't lower it; raising above 1 is allowed)
@@ -528,7 +531,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
             // EXTERNAL only: the level must be the range TOP when taken -- if
             // anything traded higher in the recent window, this pool is inside
             // the range (internal noise), and the true sweep is the level above.
-            if(InpSweepExternalOnly)
+            if(g_sweepExternal)
               {
                bool internalPool = false;
                int  upTo = MathMin(total - 1, j + InpExternalBars);
@@ -571,7 +574,7 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
             if(r[j].low >= level) continue;
             if(j > oldestJ) break;                 // grabbed long before the inversion -> stale
 
-            if(InpSweepExternalOnly)               // must be the range BOTTOM when taken
+            if(g_sweepExternal)               // must be the range BOTTOM when taken
               {
                bool internalPool = false;
                int  upTo = MathMin(total - 1, j + InpExternalBars);
