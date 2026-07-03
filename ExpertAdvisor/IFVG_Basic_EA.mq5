@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.93"
+#property version   "1.94"
 #property description "Inversion FVG scalper; simple touch-sweep + Tier 1/2/3 quality gate"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.93"
+#define EA_VER "1.94"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -1631,7 +1631,9 @@ void DrawPools(const MqlRates &r[], int total, int k, int excludeK, color c,
 //| Equal highs / lows: a level TAPPED by 2+ swings within tolerance   |
 //| = a real stop cluster (the strongest resting liquidity). Cluster-  |
 //| based (not just adjacent pairs): counts every swing near the level,|
-//| labels the count 'EQH x3', dedupes overlapping clusters, untapped. |
+//| labels the count 'EQH x3', dedupes overlapping clusters. The line  |
+//| runs from the oldest equal swing and ENDS at the FIRST candle that |
+//| cuts the level afterwards (the take); never cut -> the live bar.   |
 //+------------------------------------------------------------------+
 void DrawEqualHL(const MqlRates &r[], int total, double atr)
   {
@@ -1649,8 +1651,9 @@ void DrawEqualHL(const MqlRates &r[], int total, double atr)
          bool piv = isHigh ? IsSwingHigh(r, i, k) : IsSwingLow(r, i, k);
          if(!piv) continue;
          double lvl = isHigh ? r[i].high : r[i].low;
-         bool untapped = isHigh ? UntappedHigh(r, i, lvl) : UntappedLow(r, i, lvl);
-         if(!untapped) continue;
+         // NOTE: no untapped-only skip here -- a cluster whose level got cut is
+         // still drawn, it just TERMINATES at the cut (below). Hiding it fought
+         // the first-touch rule and left surviving lines with no end point.
 
          bool dup = false;                             // skip if near a cluster we already drew
          for(int d = 0; d < ArraySize(drawnLv); d++)
@@ -1672,13 +1675,13 @@ void DrawEqualHL(const MqlRates &r[], int total, double atr)
            }
          if(touches < 2) continue;                     // need a real cluster
 
-         // End the shelf at the MOST RECENT candle that still touches the edge.
-         // Once price leaves the level the line stops there, instead of floating
-         // across every later candle. Scan from the live bar backwards: the first
-         // candle whose range straddles the edge is the last time price was on it.
-         datetime endT = r[newest].time;                // at least span the cluster
-         for(int j = 0; j < newest; j++)                // any later re-touch extends it, then stops
-            if(r[j].low <= edge && r[j].high >= edge) { endT = r[j].time; break; }
+         // FIRST-TOUCH termination: walk chronologically FORWARD from the last
+         // equal swing and end the line at the FIRST candle whose wick reaches
+         // the edge -- that touch IS the take of the cluster's stops. Never
+         // touched again -> still a live draw, extend to the current bar.
+         datetime endT = tNow;
+         for(int j = newest - 1; j >= 0; j--)           // series array: newest-1..0 = forward in time
+            if(isHigh ? (r[j].high >= edge) : (r[j].low <= edge)) { endT = r[j].time; break; }
 
          string nm = PFX + "LQ_EQ" + (isHigh ? "H_" : "L_") + IntegerToString((int)r[i].time);
          HLine(nm, r[oldest].time, endT, edge, InpEqualLiqColor, STYLE_SOLID, 2);
