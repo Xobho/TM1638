@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.94"
+#property version   "1.95"
 #property description "Inversion FVG scalper; simple touch-sweep + Tier 1/2/3 quality gate"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.94"
+#define EA_VER "1.95"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -121,14 +121,11 @@ input group "=== Liquidity lines ==="
 input bool   InpShowLiquidity            = true;        // Draw untapped liquidity pools
 input bool   InpShowExternal             = true;        // External liquidity = MAJOR swing pools (BSL/SSL)
 input bool   InpShowInternal             = false;       // Internal liquidity = MINOR swing pools inside the range (noise for this method; off = clean)
-input bool   InpShowEqualHL              = true;        // Equal highs / lows: levels tapped by 2+ swings within tolerance (clustered stops = strongest pools)
 input int    InpExtSwingBars             = 10;          // Swing strength for EXTERNAL (major) pools
 input int    InpIntSwingBars             = 3;           // Swing strength for INTERNAL (minor) pools
-input double InpEqualTolATR              = 0.10;        // Equal-HL tolerance as a multiple of ATR
 input int    InpMaxLiqLines              = 8;           // Max lines per type/side (anti-clutter)
 input color  InpExtLiqColor              = clrOrangeRed;
 input color  InpIntLiqColor              = clrSlateGray;
-input color  InpEqualLiqColor            = clrMediumOrchid;
 input bool   InpShowMainLiq              = true;        // MAIN liquidity: session/day/week key levels everyone watches (PDH/PDL, PWH/PWL, today's H/L) -- the primary draws
 input bool   InpShowDayHL                = true;        // Also show today's developing high/low
 input color  InpMainLiqColor             = clrGold;     // Main-liquidity level color
@@ -1628,73 +1625,9 @@ void DrawPools(const MqlRates &r[], int total, int k, int excludeK, color c,
   }
 
 //+------------------------------------------------------------------+
-//| Equal highs / lows: a level TAPPED by 2+ swings within tolerance   |
-//| = a real stop cluster (the strongest resting liquidity). Cluster-  |
-//| based (not just adjacent pairs): counts every swing near the level,|
-//| labels the count 'EQH x3', dedupes overlapping clusters. The line  |
-//| runs from the oldest equal swing and ENDS at the FIRST candle that |
-//| cuts the level afterwards (the take); never cut -> the live bar.   |
-//+------------------------------------------------------------------+
-void DrawEqualHL(const MqlRates &r[], int total, double atr)
-  {
-   double tol = InpEqualTolATR * atr;
-   if(tol <= 0.0) return;
-   int      k = InpIntSwingBars;
-   datetime tNow = r[0].time;
-
-   for(int side = 0; side < 2; side++)                 // 0 = highs, 1 = lows
-     {
-      bool   isHigh = (side == 0);
-      double drawnLv[]; int drawn = 0;                 // dedupe already-drawn cluster levels
-      for(int i = k; i < total - k && drawn < InpMaxLiqLines; i++)
-        {
-         bool piv = isHigh ? IsSwingHigh(r, i, k) : IsSwingLow(r, i, k);
-         if(!piv) continue;
-         double lvl = isHigh ? r[i].high : r[i].low;
-         // NOTE: no untapped-only skip here -- a cluster whose level got cut is
-         // still drawn, it just TERMINATES at the cut (below). Hiding it fought
-         // the first-touch rule and left surviving lines with no end point.
-
-         bool dup = false;                             // skip if near a cluster we already drew
-         for(int d = 0; d < ArraySize(drawnLv); d++)
-            if(MathAbs(drawnLv[d] - lvl) <= tol) { dup = true; break; }
-         if(dup) continue;
-
-         // count every swing of this type within tol of the level (the cluster)
-         int touches = 0; double edge = lvl; int oldest = i; int newest = i;
-         for(int j = k; j < total - k; j++)
-           {
-            bool jp = isHigh ? IsSwingHigh(r, j, k) : IsSwingLow(r, j, k);
-            if(!jp) continue;
-            double jl = isHigh ? r[j].high : r[j].low;
-            if(MathAbs(jl - lvl) > tol) continue;
-            touches++;
-            if(j > oldest) oldest = j;                 // furthest-back touch (line start)
-            if(j < newest) newest = j;                 // most recent touch (where a later sweep begins)
-            if(isHigh ? (jl > edge) : (jl < edge)) edge = jl;   // outer edge = where stops sit
-           }
-         if(touches < 2) continue;                     // need a real cluster
-
-         // FIRST-TOUCH termination: walk chronologically FORWARD from the last
-         // equal swing and end the line at the FIRST candle whose wick reaches
-         // the edge -- that touch IS the take of the cluster's stops. Never
-         // touched again -> still a live draw, extend to the current bar.
-         datetime endT = tNow;
-         for(int j = newest - 1; j >= 0; j--)           // series array: newest-1..0 = forward in time
-            if(isHigh ? (r[j].high >= edge) : (r[j].low <= edge)) { endT = r[j].time; break; }
-
-         string nm = PFX + "LQ_EQ" + (isHigh ? "H_" : "L_") + IntegerToString((int)r[i].time);
-         HLine(nm, r[oldest].time, endT, edge, InpEqualLiqColor, STYLE_SOLID, 2);
-         TextAt(nm + "t", r[oldest].time, edge, (isHigh ? "EQH x" : "EQL x") + IntegerToString(touches) + " ",
-                InpEqualLiqColor, isHigh ? ANCHOR_RIGHT_LOWER : ANCHOR_RIGHT_UPPER);
-         int s = ArraySize(drawnLv); ArrayResize(drawnLv, s + 1); drawnLv[s] = lvl;
-         drawn++;
-        }
-     }
-  }
-
-//+------------------------------------------------------------------+
-//| Liquidity overlay: external (major) + internal (minor) + equal.   |
+//| Liquidity overlay: external (major) + internal (minor) pools.     |
+//| (Equal-H/L shelves were removed -- they buried the chart in       |
+//| purple lines; the Major structure + Range levels cover the read.) |
 //+------------------------------------------------------------------+
 void DrawLiquidity(const MqlRates &r[], int total)
   {
@@ -1703,8 +1636,6 @@ void DrawLiquidity(const MqlRates &r[], int total)
       DrawPools(r, total, InpExtSwingBars, 0, InpExtLiqColor, "BSL", "SSL", 2, STYLE_SOLID);
    if(InpShowInternal)
       DrawPools(r, total, InpIntSwingBars, InpExtSwingBars, InpIntLiqColor, "", "", 1, STYLE_DOT);
-   if(InpShowEqualHL)
-      DrawEqualHL(r, total, GetATR());
   }
 
 // One MAIN-liquidity level: a full-width horizontal line (fixed name -> updates
@@ -1773,7 +1704,7 @@ void DrawRangeLevels()
    datetime tNow = iTime(_Symbol, _Period, 0);
 
    // collect boxes (oldest -> newest); grow each from its oldest edge toward newer
-   int    oldIdx[]; double bHi[]; double bLo[];
+   int    oldIdx[]; int newIdx[]; double bHi[]; double bLo[];
    int i = total - 1;
    while(i >= InpRangeMinBars)
      {
@@ -1786,8 +1717,8 @@ void DrawRangeLevels()
         }
       if(i - j + 1 >= InpRangeMinBars)
         {
-         int s = ArraySize(oldIdx); ArrayResize(oldIdx,s+1); ArrayResize(bHi,s+1); ArrayResize(bLo,s+1);
-         oldIdx[s]=i; bHi[s]=hi; bLo[s]=lo;
+         int s = ArraySize(oldIdx); ArrayResize(oldIdx,s+1); ArrayResize(newIdx,s+1); ArrayResize(bHi,s+1); ArrayResize(bLo,s+1);
+         oldIdx[s]=i; newIdx[s]=j; bHi[s]=hi; bLo[s]=lo;
          i = j - 1;                              // continue past this box
         }
       else i--;
@@ -1799,9 +1730,17 @@ void DrawRangeLevels()
      {
       datetime tS = r[oldIdx[b]].time;
       string bn = PFX + "RG_" + IntegerToString((int)tS);
-      HLine(bn + "H", tS, tNow, bHi[b], InpRangeColor, STYLE_SOLID, 1);
+      // FIRST-TOUCH termination: each shelf ends at the first candle AFTER the
+      // box that reaches its level again (the take) -- never extend a spent
+      // level across later candles. Untouched -> it runs to the live bar.
+      datetime endH = tNow, endL = tNow;
+      for(int x = newIdx[b] - 1; x >= 0; x--)
+         if(r[x].high >= bHi[b]) { endH = r[x].time; break; }
+      for(int x = newIdx[b] - 1; x >= 0; x--)
+         if(r[x].low <= bLo[b])  { endL = r[x].time; break; }
+      HLine(bn + "H", tS, endH, bHi[b], InpRangeColor, STYLE_SOLID, 1);
       TextAt(bn + "Ht", tS, bHi[b], "Range H ", InpRangeColor, ANCHOR_RIGHT_LOWER);
-      HLine(bn + "L", tS, tNow, bLo[b], InpRangeColor, STYLE_SOLID, 1);
+      HLine(bn + "L", tS, endL, bLo[b], InpRangeColor, STYLE_SOLID, 1);
       TextAt(bn + "Lt", tS, bLo[b], "Range L ", InpRangeColor, ANCHOR_RIGHT_UPPER);
      }
   }
