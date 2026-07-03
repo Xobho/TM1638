@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.88"
-#property description "Inversion FVG scalper; every sweep draws its Major level line (no orphan arrows)"
+#property version   "1.89"
+#property description "Inversion FVG scalper; range/consolidation liquidity levels"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.88"
+#define EA_VER "1.89"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -126,6 +126,10 @@ input color  InpEqualLiqColor            = clrMediumOrchid;
 input bool   InpShowMainLiq              = true;        // MAIN liquidity: session/day/week key levels everyone watches (PDH/PDL, PWH/PWL, today's H/L) -- the primary draws
 input bool   InpShowDayHL                = true;        // Also show today's developing high/low
 input color  InpMainLiqColor             = clrGold;     // Main-liquidity level color
+input bool   InpShowRangeLevels          = true;        // RANGE liquidity: high & low of consolidations (flat shelves where price bases then breaks) -- horizontal pools the swing zigzag misses
+input int    InpRangeMinBars             = 12;          // A consolidation must last at least this many bars
+input double InpRangeMaxATR              = 2.0;         // ...and its whole high-low span must stay within this x ATR (tighter = only clean bases)
+input color  InpRangeColor               = clrTeal;     // Range-level color
 
 input group "=== Backtest (on-chart win/loss) ==="
 input bool   InpShowBacktest             = true;        // Tally TP-vs-SL outcomes across the window
@@ -1606,6 +1610,65 @@ void DrawMainLiquidity()
   }
 
 //+------------------------------------------------------------------+
+//| RANGE liquidity: the high & low of consolidations (flat shelves   |
+//| where price bases sideways then breaks). A consolidation = a run  |
+//| of >= InpRangeMinBars whose whole high-low span stays within      |
+//| InpRangeMaxATR*ATR. Its top/bottom are horizontal liquidity pools |
+//| the swing-pivot zigzag doesn't isolate. Most recent boxes only.    |
+//+------------------------------------------------------------------+
+void DrawRangeLevels()
+  {
+   if(!InpShowRangeLevels) return;
+   int barsWanted = 300;
+   if(PeriodSeconds(_Period) > 0)
+     {
+      int wantDays = (int)MathRound(InpMajorDays * 24.0 * 3600.0 / PeriodSeconds(_Period)) + 20;
+      barsWanted = (int)MathMin(6000.0, MathMax(300.0, (double)wantDays));
+     }
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int total = CopyRates(_Symbol, _Period, 1, barsWanted, r);
+   if(total < InpRangeMinBars + 2) return;
+   double atr = AtrFromRates(r, total, InpATRPeriod);
+   if(atr <= 0.0) return;
+   double cap = InpRangeMaxATR * atr;
+   datetime tNow = iTime(_Symbol, _Period, 0);
+
+   // collect boxes (oldest -> newest); grow each from its oldest edge toward newer
+   int    oldIdx[]; double bHi[]; double bLo[];
+   int i = total - 1;
+   while(i >= InpRangeMinBars)
+     {
+      double hi = r[i].high, lo = r[i].low; int j = i;
+      while(j - 1 >= 0)
+        {
+         double nhi = MathMax(hi, r[j-1].high), nlo = MathMin(lo, r[j-1].low);
+         if(nhi - nlo > cap) break;
+         hi = nhi; lo = nlo; j--;
+        }
+      if(i - j + 1 >= InpRangeMinBars)
+        {
+         int s = ArraySize(oldIdx); ArrayResize(oldIdx,s+1); ArrayResize(bHi,s+1); ArrayResize(bLo,s+1);
+         oldIdx[s]=i; bHi[s]=hi; bLo[s]=lo;
+         i = j - 1;                              // continue past this box
+        }
+      else i--;
+     }
+
+   int nb = ArraySize(oldIdx);
+   int from = MathMax(0, nb - 8);                // most recent 8 ranges
+   for(int b = from; b < nb; b++)
+     {
+      datetime tS = r[oldIdx[b]].time;
+      string bn = PFX + "RG_" + IntegerToString((int)tS);
+      HLine(bn + "H", tS, tNow, bHi[b], InpRangeColor, STYLE_SOLID, 1);
+      TextAt(bn + "Ht", tS, bHi[b], "Range H ", InpRangeColor, ANCHOR_RIGHT_LOWER);
+      HLine(bn + "L", tS, tNow, bLo[b], InpRangeColor, STYLE_SOLID, 1);
+      TextAt(bn + "Lt", tS, bLo[b], "Range L ", InpRangeColor, ANCHOR_RIGHT_UPPER);
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Dashboard                                                         |
 //+------------------------------------------------------------------+
 void MkLbl(string suffix, int x, int y, color c, int fs)
@@ -2381,8 +2444,10 @@ void Scan()
       ObjectsDeleteAll(0, PFX + "LQ_");
       ObjectsDeleteAll(0, PFX + "G");      // ghost (rejected) zones
       ObjectsDeleteAll(0, PFX + "ML_");    // main-liquidity levels
+      ObjectsDeleteAll(0, PFX + "RG_");    // range/consolidation levels
       DrawLiquidity(r, total);
       DrawMainLiquidity();                     // PDH/PDL/PWH/PWL + day H/L (the primary draws)
+      DrawRangeLevels();                       // consolidation high/low shelves
       DrawStructure(total);
       DrawSweeps();                            // mark every swept Major (structural confirmation)
      }
