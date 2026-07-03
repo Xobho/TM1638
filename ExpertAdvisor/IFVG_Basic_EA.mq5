@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.83"
-#property description "Inversion FVG scalper; Major-H/L-driven, with on-chart sweep confirmation marks"
+#property version   "1.84"
+#property description "Inversion FVG scalper; multi-pool sweep strength (stacked Major levels taken)"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.83"
+#define EA_VER "1.84"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -56,6 +56,7 @@ input double InpSweepMaxDistATR          = 3.0;         // Swept Major level mus
 input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the inversion candle (the sweep must be what CAUSED this reversal; 0 = no cap)
 input int    InpSweepReclaimBars         = 8;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (a slow flush is still a grab; scalp forces >=8). 1 = same-candle only
 input double InpSweepMaxDepthATR         = 1.5;         // Max flush depth BEYOND the level (x ATR): shallow = stop-hunt (swept), deep = breakdown (not a grab). This, not time, guards against fading real breakouts (0 = off)
+input int    InpMinSweepPools            = 1;           // Require the sweep run to take out >= this many stacked Major levels (2+ = only strong, multi-pool grabs; 1 = any). Watch the 'mlt' factor edge first, then raise
 
 enum ENUM_SL_MODE
   {
@@ -228,6 +229,7 @@ struct IFVGSetup
    double   sweepLevel;       // the pool price that got taken
    double   sweepExtreme;     // the wick that took it
    datetime sweepBreakTime;   // the candle that did the sweeping
+   int      sweepPools;       // how many Major levels the sweep run took out (stacked pools = stronger grab)
    bool     hadMSS;
    datetime mssTime;
    double   mssLevel;
@@ -258,10 +260,10 @@ bool   g_majHi[];
 // Factor statistics: per reliability feature, historical wins/samples with the
 // feature true [1] vs false [0], filled by the backtest pass. This is what
 // tells us WHICH IFVGs are more reliable on this symbol+TF, from evidence.
-#define NFEAT 5
+#define NFEAT 6
 int    g_ftWin[NFEAT][2];
 int    g_ftTot[NFEAT][2];
-string g_ftName[NFEAT] = {"swp","gap","brk","tp","trd"};
+string g_ftName[NFEAT] = {"swp","gap","brk","tp","trd","mlt"};
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -490,8 +492,10 @@ void ComputeHTFBias()                               // current bias, for the das
 //+------------------------------------------------------------------+
 bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
                 double gapLow, double gapHigh, double atr,
-                datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak)
+                datetime &swTime, double &swLevel, double &swExtreme, datetime &swBreak,
+                int &poolCount)
   {
+   poolCount = 0;
    int    np      = ArraySize(g_majPx);
    double maxDist = (InpSweepMaxDistATR > 0 && atr > 0) ? InpSweepMaxDistATR * atr : DBL_MAX;
    int    oldestJ = (InpSweepMaxBarsBack > 0) ? brk + InpSweepMaxBarsBack : total; // grab must be shortly BEFORE the inversion (it caused this reversal)
@@ -568,6 +572,16 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
            }
         }
      }
+
+   // Count the stacked Major levels the grab run took out (the sweep extreme
+   // reached through them). More pools = a stronger, higher-conviction grab.
+   if(found)
+      for(int p = 0; p < np; p++)
+        {
+         if(g_majIdx[p] <= brk) continue;
+         if(bearish && g_majHi[p] && g_majPx[p] >= gapHigh && g_majPx[p] <= swExtreme) poolCount++;
+         if(!bearish && !g_majHi[p] && g_majPx[p] <= gapLow && g_majPx[p] >= swExtreme) poolCount++;
+        }
    return found;
   }
 
@@ -606,6 +620,7 @@ void SetupFeatures(const IFVGSetup &s, bool &f[])
    f[2] = (s.brkDispATR >= 0.7);
    f[3] = s.tpIsLiquidity;
    f[4] = s.withTrend;
+   f[5] = (s.sweepPools >= 2);      // multi-pool grab (took out stacked Major levels)
   }
 
 //+------------------------------------------------------------------+
@@ -800,10 +815,13 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
 
          // Confluences -- the liquidity sweep is the PRIMARY reversal signal,
          // so it is checked first; MSS is an optional extra (off by default).
-         datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0;
-         bool hadSweep = CheckSweep(r, total, bearish, m, brk, gapLow, gapHigh, atr, swTime, swLevel, swExtreme, swBreak);
+         datetime swTime = 0, swBreak = 0; double swLevel = 0, swExtreme = 0; int swPools = 0;
+         bool hadSweep = CheckSweep(r, total, bearish, m, brk, gapLow, gapHigh, atr, swTime, swLevel, swExtreme, swBreak, swPools);
          if(g_useSweep && !hadSweep)
            { RecReject(diag, bearish, "no sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "no sweep"); continue; }
+         // Strength gate: require the grab to have taken out enough stacked pools.
+         if(g_useSweep && InpMinSweepPools > 1 && swPools < InpMinSweepPools)
+           { RecReject(diag, bearish, "weak sweep"); PushGhost(diag, bearish, gapLow, gapHigh, r[m+1].time, r[brk].time, "weak sweep"); continue; }
 
          datetime mssTime = 0; double mssLevel = 0;
          bool hadMSS = CheckMSS(r, total, bearish, brk, m, mssTime, mssLevel);
@@ -822,7 +840,7 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          s.valid = true; s.bullish = !bearish;
          s.gapLow = gapLow; s.gapHigh = gapHigh; s.gapTime = r[m + 1].time;
          s.breakTime = r[brk].time; s.breakIdx = brk; s.breakLevel = bearish ? gapLow : gapHigh;
-         s.hadSweep = hadSweep; s.sweepTime = swTime; s.sweepLevel = swLevel; s.sweepExtreme = swExtreme; s.sweepBreakTime = swBreak;
+         s.hadSweep = hadSweep; s.sweepTime = swTime; s.sweepLevel = swLevel; s.sweepExtreme = swExtreme; s.sweepBreakTime = swBreak; s.sweepPools = swPools;
          s.hadMSS = hadMSS; s.mssTime = mssTime; s.mssLevel = mssLevel;
 
          s.tested = false;
@@ -1006,7 +1024,8 @@ void DrawSetup(const IFVGSetup &s, int idx)
    double est, need; SetupOdds(s, est, need);
    string tag = (s.bullish ? "IFVG BUY  " : "IFVG SELL ") + "R:R " + DoubleToString(s.rr, 1) +
                 "  win~" + DoubleToString(est, 0) + "% (" + OddsGrade(est, need) + ")" +
-                (s.hadSweep ? "  swept " + DoubleToString(s.sweepLevel, _Digits) : "") +
+                (s.hadSweep ? "  swept " + DoubleToString(s.sweepLevel, _Digits)
+                              + (s.sweepPools > 1 ? " x" + IntegerToString(s.sweepPools) : "") : "") +
                 (s.stage == "ready" ? "  [READY]" : "") + (s.tested ? "  (tested)" : "");
    TextAt(base + "Lbl", s.gapTime, s.bullish ? s.gapLow : s.gapHigh, tag, c,
           s.bullish ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
