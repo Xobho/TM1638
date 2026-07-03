@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.82"
-#property description "Inversion FVG scalper; Major-H/L-driven: sweep starts it, wick bounds it, next Major is the target"
+#property version   "1.83"
+#property description "Inversion FVG scalper; Major-H/L-driven, with on-chart sweep confirmation marks"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.82"
+#define EA_VER "1.83"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -85,6 +85,7 @@ input color  InpEntryColor               = clrGoldenrod;
 input color  InpSLColor                  = clrRed;
 input color  InpTPColor                  = clrGreen;
 input color  InpSweepColor               = clrMagenta;
+input bool   InpShowSweepMarks           = true;        // Mark EVERY Major level the EA reads as swept (grabbed + rejected), so you can confirm its sweep reads -- separate from the tradeable IFVG zones
 input color  InpStructHighColor          = clrTomato;
 input color  InpStructLowColor           = clrDodgerBlue;
 input int    InpStructSwingBars          = 4;           // Swing strength for the M15 structure + MSS confluence (smaller = more swings, matches a finer hand-marked structure)
@@ -1068,6 +1069,70 @@ void DrawGhosts()
       string tag = (g.bullish ? "buy? " : "sell? ") + g.rejReason;
       TextAt(base + "Lbl", g.gapTime, g.bullish ? g.gapLow : g.gapHigh, tag, C'120,125,135',
              g.bullish ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Mark every MAJOR level that was SWEPT (grabbed + rejected), on its |
+//| own -- not tied to any gap. This is the structural event: 'a Major |
+//| H/L was taken'. A tradeable IFVG is then the subset where a fresh  |
+//| gap inverts on the return. Lets you confirm the EA's sweep reads   |
+//| match your eye. Uses the same run-and-reclaim + depth rule as the  |
+//| trading path, over the drawn Major pivots (g_maj*).                |
+//+------------------------------------------------------------------+
+void DrawSweeps()
+  {
+   if(!InpShowSweepMarks) return;
+   int barsWanted = 300;
+   if(PeriodSeconds(_Period) > 0)
+     {
+      int wantDays = (int)MathRound(InpMajorDays * 24.0 * 3600.0 / PeriodSeconds(_Period)) + 4 * InpATRPeriod + 20;
+      barsWanted = (int)MathMin(6000.0, MathMax(300.0, (double)wantDays));
+     }
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int total = CopyRates(_Symbol, _Period, 1, barsWanted, r);
+   if(total < 10) return;
+
+   // Same Major pivots as the drawn lines, so markers land on those levels.
+   int    pIdx[]; double pPx[]; bool pHi[];
+   ComputeMajorPivots(r, total, AtrFromRates(r, total, InpATRPeriod), pIdx, pPx, pHi);
+
+   int    reclaim = (InpSweepReclaimBars > 1) ? InpSweepReclaimBars : 1;
+   if(InpScalpMode) reclaim = (int)MathMax(reclaim, 8);
+   double atr      = GetATR();
+   double depthCap = (InpSweepMaxDepthATR > 0 && atr > 0) ? InpSweepMaxDepthATR * atr : DBL_MAX;
+
+   int np = ArraySize(pIdx), drawn = 0;
+   for(int p = 0; p < np && drawn < 60; p++)
+     {
+      int    idx    = pIdx[p];
+      double level  = pPx[p];
+      bool   isHigh = pHi[p];
+      for(int j = idx - 1; j >= 0; j--)                 // first return to the level (newer bars)
+        {
+         bool reached = isHigh ? (r[j].high >= level) : (r[j].low <= level);
+         if(!reached) continue;
+
+         int lastC = j - (reclaim - 1); if(lastC < 0) lastC = 0;
+         double ext = isHigh ? 0.0 : DBL_MAX; int extIdx = j, rec = -1;
+         for(int c = j; c >= lastC; c--)
+           {
+            if(isHigh) { if(r[c].high > ext) { ext = r[c].high; extIdx = c; } if(r[c].close < level) { rec = c; break; } }
+            else       { if(r[c].low  < ext) { ext = r[c].low;  extIdx = c; } if(r[c].close > level) { rec = c; break; } }
+           }
+         bool depthOK = isHigh ? (ext - level <= depthCap) : (level - ext <= depthCap);
+         if(rec >= 0 && depthOK)                        // grabbed + reclaimed + shallow = swept
+           {
+            string nm = PFX + "SW_" + IntegerToString((int)r[extIdx].time);
+            ArrowAt(nm, r[extIdx].time, ext, isHigh ? 234 : 233, InpSweepColor,
+                    isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
+            TextAt(nm + "t", r[extIdx].time, ext, " swept", InpSweepColor,
+                   isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+            drawn++;
+           }
+         break;                                         // first reach handled either way
+        }
      }
   }
 
@@ -2220,6 +2285,7 @@ void Scan()
       ObjectsDeleteAll(0, PFX + "G");      // ghost (rejected) zones
       DrawLiquidity(r, total);
       DrawStructure(total);
+      DrawSweeps();                            // mark every swept Major (structural confirmation)
      }
 
    IFVGSetup setups[];
