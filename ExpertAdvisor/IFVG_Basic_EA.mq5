@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.90"
-#property description "Inversion FVG scalper; fractal-swing majors + clustered equal H/L"
+#property version   "1.91"
+#property description "Inversion FVG scalper; simple touch-sweep + Tier 1/2/3 quality gate"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.90"
+#define EA_VER "1.91"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -52,6 +52,7 @@ input bool   InpUseLiquiditySweep        = true;        // KEY confluence: requi
 input bool   InpUseMSS                   = false;       // Require the break candle to ALSO shift structure (redundant when a sweep is required; off by default)
 // NOTE: the sweep = a MAJOR level taken out. Tune it with InpMajorMoveATR /
 // InpMajorPivotBars (Visuals group) -- the drawn Major lines ARE the pools.
+input bool   InpSimpleSweep              = true;        // Simple sweep: a Major level counts as SWEPT the moment price TOUCHES it (no grab/reject/reclaim/depth gymnastics) -- quality is decided by the Tier gate below. Scalp forces ON
 input double InpSweepMaxDistATR          = 3.0;         // Swept Major level must sit within this x ATR of the zone (a pool far away is not THIS setup's liquidity; 0 = no cap)
 input int    InpSweepMaxBarsBack         = 24;          // The grab must happen within this many bars BEFORE the inversion candle (the sweep must be what CAUSED this reversal; 0 = no cap)
 input int    InpSweepReclaimBars         = 8;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (a slow flush is still a grab; scalp forces >=8). 1 = same-candle only
@@ -59,6 +60,11 @@ input double InpSweepMaxDepthATR         = 1.5;         // Max flush depth BEYON
 input int    InpMinSweepPools            = 1;           // Require the sweep run to take out >= this many stacked Major levels (2+ = only strong, multi-pool grabs; 1 = any). Watch the 'mlt' factor edge first, then raise
 input bool   InpSweepExternalOnly        = false;       // Sweep must take EXTERNAL liquidity (range extreme only). OFF = ANY Major line taken counts as the sweep (simpler). Scalp forces OFF
 input int    InpExternalBars             = 48;          // 'External' window: no higher high (lower low) within this many bars before the grab
+
+input group "=== Quality tier (confluence gate) ==="
+input bool   InpUsePremiumDiscount       = true;        // Score premium/discount as a confluence: BUY in discount (lower half) / SELL in premium (upper half) of the local dealing range
+input int    InpPDRangeBars              = 60;          // Bars (from the inversion, backwards) defining the dealing range whose midpoint = equilibrium for premium/discount
+input int    InpMinTierTrade             = 3;           // Only AUTO-TRADE setups at or above this tier: 1 = Tier-1 only (best), 2 = Tier 1-2, 3 = all tiers. Zones of every tier are still DRAWN
 
 enum ENUM_SL_MODE
   {
@@ -181,6 +187,7 @@ bool     g_useHTFBias       = true;
 bool     g_useMSS           = false;
 bool     g_useSweep         = true;
 bool     g_sweepExternal    = false;
+bool     g_simpleSweep      = true;    // touch = swept (quality moves to the Tier gate)
 double   g_majorMoveATR     = 0.0;     // 0 = fractal-swing majors (deterministic); >0 = ATR-zigzag
 double   g_minRR            = 2.0;
 bool     g_adaptTP          = true;
@@ -205,6 +212,8 @@ double   g_liveSL      = 0.0;     // monitored setup's SL/TP (for market-on-rete
 double   g_liveTP      = 0.0;
 double   g_liveEst     = 0.0;     // monitored setup's estimated win % / break-even need %
 double   g_liveNeed    = 0.0;
+int      g_liveTier    = 0;       // monitored setup's quality tier (1/2/3) + score
+int      g_liveScore   = 0;
 
 // backtest tally (filled by RunBacktest, shown on the dashboard)
 int      g_btWins     = 0;
@@ -258,6 +267,9 @@ struct IFVGSetup
    double   gapATR;        // gap size in ATR (bigger displacement = stronger imbalance)
    double   brkDispATR;    // inversion candle body in ATR (decisive vs marginal close-through)
    bool     withTrend;     // aligned with the HTF structure trend at the break (measured, not filtered)
+   bool     inPD;          // sits on the right side of the dealing range (buy in discount / sell in premium)
+   int      qscore;        // 0-100 confluence quality score
+   int      tier;          // 1 (best) / 2 / 3, from the quality score
   };
 
 IFVGSetup g_ghosts[];      // rejected IFVG candidates (drawn faded, labelled with the reason)
@@ -272,10 +284,10 @@ bool   g_majHi[];
 // Factor statistics: per reliability feature, historical wins/samples with the
 // feature true [1] vs false [0], filled by the backtest pass. This is what
 // tells us WHICH IFVGs are more reliable on this symbol+TF, from evidence.
-#define NFEAT 6
+#define NFEAT 7
 int    g_ftWin[NFEAT][2];
 int    g_ftTot[NFEAT][2];
-string g_ftName[NFEAT] = {"swp","gap","brk","tp","trd","mlt"};
+string g_ftName[NFEAT] = {"swp","gap","brk","tp","trd","mlt","pd"};
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -290,6 +302,7 @@ int OnInit()
    g_useMSS            = InpUseMSS;
    g_useSweep          = InpUseLiquiditySweep;
    g_sweepExternal     = InpSweepExternalOnly;
+   g_simpleSweep       = InpSimpleSweep;
    g_majorMoveATR      = InpMajorMoveATR;
    g_minRR             = InpMinRR;
    g_adaptTP           = InpAdaptTP;
@@ -301,6 +314,7 @@ int OnInit()
       g_useMSS            = false;          // sweep is the reversal signal -- MSS is redundant
       g_useSweep          = true;           // the sweep is THE confluence -- always required here
       g_sweepExternal     = false;          // ANY Major line taken = the sweep (simple rule)
+      g_simpleSweep       = true;           // touch = swept; the Tier gate decides quality
       g_majorMoveATR      = 0.0;            // fractal-swing majors (deterministic), not the ATR-zigzag
       g_minRR             = InpScalpRR;     // tight, fixed target
       g_adaptTP           = false;          // take the quick target, don't chase swings
@@ -519,6 +533,58 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
    if(InpScalpMode) reclaim = (int)MathMax(reclaim, 8);                            // scalp: slow flushes count too -- the DEPTH cap guards breakouts
    double depthCap = (InpSweepMaxDepthATR > 0 && atr > 0) ? InpSweepMaxDepthATR * atr : DBL_MAX;
    bool   found = false;
+
+   // --- SIMPLE model: a Major level is SWEPT the instant price TOUCHES it ---
+   // No grab/reject/reclaim/depth gymnastics -- a touched pool is a taken pool,
+   // exactly like the SmartLiquidityZones indicator. All the quality judgement
+   // moves downstream to the Tier gate (SetupTier). We still keep the two sane
+   // guards: the pool must be near the zone (maxDist) and the take must be
+   // recent enough to have CAUSED this inversion (oldestJ).
+   if(g_simpleSweep)
+     {
+      for(int p = 0; p < np; p++)
+        {
+         int idx = g_majIdx[p];
+         if(idx <= brk + 1) continue;              // the major must sit before the inversion
+         if(bearish && g_majHi[p])                 // a Major HIGH touched = sell-side sweep
+           {
+            double level = g_majPx[p];
+            if(level < gapLow) continue;           // real overhead liquidity (at/above the zone)
+            if(level - gapHigh > maxDist) continue;
+            if(found && level <= swLevel) continue;// keep the HIGHEST swept high
+            for(int j = idx - 1; j >= brk; j--)    // first return to the level
+              {
+               if(r[j].high < level) continue;     // not touched yet -> still resting
+               if(j > oldestJ) break;              // touched long before the inversion -> stale
+               swTime = r[idx].time; swLevel = level; swExtreme = r[j].high; swBreak = r[j].time; found = true;
+               break;
+              }
+           }
+         else if(!bearish && !g_majHi[p])          // a Major LOW touched = buy-side sweep
+           {
+            double level = g_majPx[p];
+            if(level > gapHigh) continue;          // real liquidity below (at/below the zone)
+            if(gapLow - level > maxDist) continue;
+            if(found && level >= swLevel) continue;// keep the LOWEST swept low
+            for(int j = idx - 1; j >= brk; j--)
+              {
+               if(r[j].low > level) continue;
+               if(j > oldestJ) break;
+               swTime = r[idx].time; swLevel = level; swExtreme = r[j].low; swBreak = r[j].time; found = true;
+               break;
+              }
+           }
+        }
+      if(found)                                    // stacked pools the touch wick reached through
+         for(int p = 0; p < np; p++)
+           {
+            if(g_majIdx[p] <= brk) continue;
+            if(bearish && g_majHi[p] && g_majPx[p] >= gapHigh && g_majPx[p] <= swExtreme) poolCount++;
+            if(!bearish && !g_majHi[p] && g_majPx[p] <= gapLow && g_majPx[p] >= swExtreme) poolCount++;
+           }
+      return found;
+     }
+
    for(int p = 0; p < np; p++)
      {
       int idx = g_majIdx[p];
@@ -658,6 +724,50 @@ void SetupFeatures(const IFVGSetup &s, bool &f[])
    f[3] = s.tpIsLiquidity;
    f[4] = s.withTrend;
    f[5] = (s.sweepPools >= 2);      // multi-pool grab (took out stacked Major levels)
+   f[6] = s.inPD;                   // in discount (buy) / premium (sell) of the dealing range
+  }
+
+//+------------------------------------------------------------------+
+//| Dealing-range equilibrium for premium/discount: the midpoint of  |
+//| the high..low over the InpPDRangeBars ending AT the inversion.   |
+//| A BUY in the lower half is in 'discount', a SELL in the upper    |
+//| half is in 'premium' -- the classic ICT location filter. Returns |
+//| 0 when the window is degenerate (treated as no-signal upstream). |
+//+------------------------------------------------------------------+
+double PremiumDiscountEq(const MqlRates &r[], int total, int brk)
+  {
+   int end = MathMin(total - 1, brk + MathMax(10, InpPDRangeBars));
+   double hi = -DBL_MAX, lo = DBL_MAX;
+   for(int i = brk; i <= end; i++)
+     {
+      if(r[i].high > hi) hi = r[i].high;
+      if(r[i].low  < lo) lo = r[i].low;
+     }
+   if(hi <= lo) return 0.0;
+   return (hi + lo) * 0.5;
+  }
+
+//+------------------------------------------------------------------+
+//| Quality tier from the confluence stack (like the indicator's     |
+//| GetBBTier). A 0-100 score -- sweep quality, imbalance size,       |
+//| decisive inversion, target at real liquidity, trend alignment,    |
+//| multi-pool grab, premium/discount -- bucketed into Tier 1/2/3.    |
+//+------------------------------------------------------------------+
+int SetupTier(const IFVGSetup &s, int &qscore)
+  {
+   int sc = 0;
+   if(s.hadSweep)              sc += 10;   // a pool was taken at all (required, but scored)
+   if(s.sweepDistATR <= 1.5)  sc += 15;   // ...and it sits tight to the zone (clean grab)
+   if(s.gapATR >= 0.5)        sc += 15;   // sizeable imbalance
+   if(s.brkDispATR >= 0.7)    sc += 15;   // decisive inversion candle
+   if(s.tpIsLiquidity)        sc += 15;   // target is a real untapped draw
+   if(s.withTrend)            sc += 10;   // aligned with structure trend
+   if(s.sweepPools >= 2)      sc += 10;   // multi-pool (stacked) grab
+   if(s.inPD)                 sc += 10;   // right side of the dealing range
+   qscore = sc;
+   if(sc >= 70) return 1;
+   if(sc >= 45) return 2;
+   return 3;
   }
 
 //+------------------------------------------------------------------+
@@ -889,7 +999,9 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          // BEFORE the retest is not a grab anymore -- the level broke (CHoCH /
          // continuation), so the reversal premise is gone and the setup is void.
          // (After the retest a live trade's SL owns the risk instead.)
-         if(hadSweep)
+         // Skipped in simple-sweep mode: a touch is a touch, and the Tier gate --
+         // not this reject/reclaim test -- is what grades quality there.
+         if(hadSweep && !g_simpleSweep)
            {
             int stopAt = (touchIdx >= 0) ? touchIdx + 1 : 0;
             bool grabFailed = false;
@@ -980,6 +1092,19 @@ int FindIFVGs(const MqlRates &r[], int total, IFVGSetup &out[], int maxSetups, b
          bool tUp, tDown; HTFBiasAt(r[brk].time, tUp, tDown);
          s.withTrend = bearish ? tDown : tUp;
 
+         // Premium/discount location: buy in the lower half (discount) / sell in
+         // the upper half (premium) of the local dealing range. Off -> neutral
+         // (counts as aligned so it never penalises when the user disables it).
+         s.inPD = true;
+         if(InpUsePremiumDiscount)
+           {
+            double eq = PremiumDiscountEq(r, total, brk);
+            if(eq > 0.0) s.inPD = bearish ? (s.entry >= eq) : (s.entry <= eq);
+           }
+
+         // Confluence tier (Tier 1 = best) from the full factor stack.
+         s.tier = SetupTier(s, s.qscore);
+
          RecReject(diag, bearish, "ok");        // passed all filters
 
          // ONE setup per sweep event: a sweep's reversal leg is one play, so
@@ -1060,6 +1185,7 @@ void DrawSetup(const IFVGSetup &s, int idx)
 
    double est, need; SetupOdds(s, est, need);
    string tag = (s.bullish ? "IFVG BUY  " : "IFVG SELL ") + "R:R " + DoubleToString(s.rr, 1) +
+                "  T" + IntegerToString(s.tier) + "(" + IntegerToString(s.qscore) + ")" +
                 "  win~" + DoubleToString(est, 0) + "% (" + OddsGrade(est, need) + ")" +
                 (s.hadSweep ? "  swept " + DoubleToString(s.sweepLevel, _Digits)
                               + (s.sweepPools > 1 ? " x" + IntegerToString(s.sweepPools) : "") : "") +
@@ -1133,8 +1259,9 @@ void DrawGhosts()
 //| own -- not tied to any gap. This is the structural event: 'a Major |
 //| H/L was taken'. A tradeable IFVG is then the subset where a fresh  |
 //| gap inverts on the return. Lets you confirm the EA's sweep reads   |
-//| match your eye. Uses the same run-and-reclaim + depth rule as the  |
-//| trading path, over the drawn Major pivots (g_maj*).                |
+//| match your eye. Uses the SAME rule as the trading path over the    |
+//| drawn Major pivots: a simple TOUCH in simple mode, else the        |
+//| classic run-and-reclaim + depth test.                              |
 //+------------------------------------------------------------------+
 void DrawSweeps()
   {
@@ -1170,15 +1297,25 @@ void DrawSweeps()
          bool reached = isHigh ? (r[j].high >= level) : (r[j].low <= level);
          if(!reached) continue;
 
-         int lastC = j - (reclaim - 1); if(lastC < 0) lastC = 0;
-         double ext = isHigh ? 0.0 : DBL_MAX; int extIdx = j, rec = -1;
-         for(int c = j; c >= lastC; c--)
+         double ext; int extIdx = j; bool swept;
+         if(g_simpleSweep)                              // touch = swept (matches the trading path)
            {
-            if(isHigh) { if(r[c].high > ext) { ext = r[c].high; extIdx = c; } if(r[c].close < level) { rec = c; break; } }
-            else       { if(r[c].low  < ext) { ext = r[c].low;  extIdx = c; } if(r[c].close > level) { rec = c; break; } }
+            ext   = isHigh ? r[j].high : r[j].low;
+            swept = true;
            }
-         bool depthOK = isHigh ? (ext - level <= depthCap) : (level - ext <= depthCap);
-         if(rec >= 0 && depthOK)                        // grabbed + reclaimed + shallow = swept
+         else                                           // classic: grab + reclaim + shallow flush
+           {
+            int lastC = j - (reclaim - 1); if(lastC < 0) lastC = 0;
+            ext = isHigh ? 0.0 : DBL_MAX; int rec = -1;
+            for(int c = j; c >= lastC; c--)
+              {
+               if(isHigh) { if(r[c].high > ext) { ext = r[c].high; extIdx = c; } if(r[c].close < level) { rec = c; break; } }
+               else       { if(r[c].low  < ext) { ext = r[c].low;  extIdx = c; } if(r[c].close > level) { rec = c; break; } }
+              }
+            bool depthOK = isHigh ? (ext - level <= depthCap) : (level - ext <= depthCap);
+            swept = (rec >= 0 && depthOK);
+           }
+         if(swept)                                      // taken = swept
            {
             string nm = PFX + "SW_" + IntegerToString((int)r[extIdx].time);
             // Draw the Major LEVEL that was taken, right at the grab, so the
@@ -1805,8 +1942,9 @@ void Dashboard()
    string sprTxt = "spread " + IntegerToString((int)spr) + (sprCap > 0 ? "/" + IntegerToString(sprCap) : "/-")
                    + " pts   ATR " + DoubleToString(atr, _Digits);
    SetVal("Mkt",  sprTxt, (sprCap > 0 && spr > sprCap) ? clrTomato : clrSilver);
-   string fl = (g_useSweep ? "Sweep " : "") + (g_useMSS ? "MSS " : "") + (g_useHTFBias ? "HTF" : "");
-   if(fl == "") fl = "none";
+   string fl = (g_useSweep ? (g_simpleSweep ? "Sweep(touch) " : "Sweep ") : "")
+             + (g_useMSS ? "MSS " : "") + (g_useHTFBias ? "HTF " : "")
+             + StringFormat("| trade T<=%d", InpMinTierTrade);
    SetVal("Filt", fl, clrAqua);
    SetVal("Set",  IntegerToString(g_lastBull) + " buy / " + IntegerToString(g_lastBear) + " sell", clrWhite);
    string rb = (g_rejBuy  == "" ? "none" : (g_rejBuy  == "ok" ? "ok" : "rej(" + g_rejBuy  + ")"));
@@ -1898,7 +2036,8 @@ void Dashboard()
       string grade = OddsGrade(g_liveEst, g_liveNeed);
       color  oc = (grade == "A") ? clrLime : (grade == "B") ? clrYellowGreen
                  : (grade == "C") ? clrGold : clrTomato;
-      SetVal("Odds", StringFormat("win~%.0f%%  need %.0f%%  [%s]", g_liveEst, g_liveNeed, grade), oc);
+      SetVal("Odds", StringFormat("T%d(%d)  win~%.0f%%  need %.0f%%  [%s]",
+                     g_liveTier, g_liveScore, g_liveEst, g_liveNeed, grade), oc);
      }
 
    string autoTxt; color autoCol;
@@ -2283,6 +2422,7 @@ void TryMarketEntry()
    if(InpEntryMode != ENTRY_MARKET_NOW) return;
    if(!TradingAllowed())                 return;
    if(!g_liveWaiting)                     return;                 // no setup waiting to be retested
+   if(g_liveTier > InpMinTierTrade)       return;                 // below the min quality tier -> watch, don't trade
    if(g_liveTime <= g_lastMktBreakTime)   return;                 // already entered this one
    if(g_liveBull  && !InpTradeBuys)       return;
    if(!g_liveBull && !InpTradeSells)      return;
@@ -2334,6 +2474,7 @@ void ManageTrades(const IFVGSetup &setups[], int n)
      {
       if(CountMyOrders() >= InpMaxPositions) break;
       if(setups[i].tested) continue;                       // already retested -> opportunity gone, never re-trade a tested zone
+      if(setups[i].tier > InpMinTierTrade) continue;       // below the min quality tier -> draw it, don't trade it
       if(setups[i].bullish  && !InpTradeBuys)  continue;
       if(!setups[i].bullish && !InpTradeSells) continue;
 
@@ -2481,6 +2622,7 @@ void Scan()
       g_liveBull = setups[i].bullish; g_liveEntry = setups[i].entry;
       g_liveTested = false; g_liveTime = setups[i].breakTime;
       g_liveSL = setups[i].sl; g_liveTP = setups[i].tp;
+      g_liveTier = setups[i].tier; g_liveScore = setups[i].qscore;
       SetupOdds(setups[i], g_liveEst, g_liveNeed);
       break;
      }
@@ -2489,6 +2631,7 @@ void Scan()
       g_liveValid = true; g_liveBull = setups[0].bullish; g_liveEntry = setups[0].entry;
       g_liveTested = setups[0].tested; g_liveTime = setups[0].breakTime;
       g_liveSL = setups[0].sl; g_liveTP = setups[0].tp;
+      g_liveTier = setups[0].tier; g_liveScore = setups[0].qscore;
       SetupOdds(setups[0], g_liveEst, g_liveNeed);
      }
 
