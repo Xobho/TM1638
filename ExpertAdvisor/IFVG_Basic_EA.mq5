@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.85"
-#property description "Inversion FVG scalper; main liquidity levels (PDH/PDL/PWH/PWL)"
+#property version   "1.86"
+#property description "Inversion FVG scalper; external liquidity only -- clean chart, range-extreme sweeps"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.85"
+#define EA_VER "1.86"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -57,6 +57,8 @@ input int    InpSweepMaxBarsBack         = 24;          // The grab must happen 
 input int    InpSweepReclaimBars         = 8;           // The take may span up to this many candles: price may CLOSE through the level but must close back within N candles (a slow flush is still a grab; scalp forces >=8). 1 = same-candle only
 input double InpSweepMaxDepthATR         = 1.5;         // Max flush depth BEYOND the level (x ATR): shallow = stop-hunt (swept), deep = breakdown (not a grab). This, not time, guards against fading real breakouts (0 = off)
 input int    InpMinSweepPools            = 1;           // Require the sweep run to take out >= this many stacked Major levels (2+ = only strong, multi-pool grabs; 1 = any). Watch the 'mlt' factor edge first, then raise
+input bool   InpSweepExternalOnly        = true;        // Sweep must take EXTERNAL liquidity: the level must be the range extreme (nothing beyond it recently) -- internal pools inside the range are noise
+input int    InpExternalBars             = 48;          // 'External' window: no higher high (lower low) within this many bars before the grab
 
 enum ENUM_SL_MODE
   {
@@ -99,6 +101,7 @@ input double InpMajorMoveATR             = 2.5;         // MAJOR level = a swing
 input int    InpMajorPivotBars           = 4;           // A major pivot must also be a real fractal swing (this many lower/higher bars each side); bigger = only clean swings
 input int    InpMajorSwingBars           = 15;          // Fallback swing strength for MAJOR structure when InpMajorMoveATR = 0
 input double InpMajorDays                 = 10.0;        // Draw major levels going back at least this many days
+input bool   InpMajorUntappedOnly        = true;        // Draw only UNTAPPED Major levels (the live liquidity shelf); tapped ones are spent -- recent grabs still show as 'swept' arrows
 input int    InpMaxMajorLines            = 4;           // (legacy) max major lines per side -- ignored; the days window governs
 input color  InpMajorStructColor         = clrBlue;     // Major-structure level color
 input bool   InpMTFStructure             = false;       // ALSO draw structure from 2 higher timeframes (labels tagged by TF)
@@ -111,8 +114,8 @@ input color  InpTextColor                = clrBlack;    // Label text (black on 
 input group "=== Liquidity lines ==="
 input bool   InpShowLiquidity            = true;        // Draw untapped liquidity pools
 input bool   InpShowExternal             = true;        // External liquidity = MAJOR swing pools (BSL/SSL)
-input bool   InpShowInternal             = true;        // Internal liquidity = MINOR swing pools inside the range
-input bool   InpShowEqualHL              = true;        // Equal highs / lows (clustered stops)
+input bool   InpShowInternal             = false;       // Internal liquidity = MINOR swing pools inside the range (noise for this method; off = clean)
+input bool   InpShowEqualHL              = false;       // Equal highs / lows (clustered stops; off = clean)
 input int    InpExtSwingBars             = 10;          // Swing strength for EXTERNAL (major) pools
 input int    InpIntSwingBars             = 3;           // Swing strength for INTERNAL (minor) pools
 input double InpEqualTolATR              = 0.10;        // Equal-HL tolerance as a multiple of ATR
@@ -522,6 +525,18 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
             // Grab must be recent: sweep -> reversal -> inversion, one play.
             if(j > oldestJ) break;                 // grabbed long before the inversion -> stale, not its sweep
 
+            // EXTERNAL only: the level must be the range TOP when taken -- if
+            // anything traded higher in the recent window, this pool is inside
+            // the range (internal noise), and the true sweep is the level above.
+            if(InpSweepExternalOnly)
+              {
+               bool internalPool = false;
+               int  upTo = MathMin(total - 1, j + InpExternalBars);
+               for(int y = j + 1; y <= upTo; y++)
+                  if(r[y].high > level) { internalPool = true; break; }
+               if(internalPool) break;
+              }
+
             // Run-and-reclaim: the take may span a few candles. Price may even
             // CLOSE above the level, but must close back BELOW it within the
             // reclaim window -- otherwise the level BROKE (CHoCH), not swept.
@@ -555,6 +570,15 @@ bool CheckSweep(const MqlRates &r[], int total, bool bearish, int m, int brk,
            {
             if(r[j].low >= level) continue;
             if(j > oldestJ) break;                 // grabbed long before the inversion -> stale
+
+            if(InpSweepExternalOnly)               // must be the range BOTTOM when taken
+              {
+               bool internalPool = false;
+               int  upTo = MathMin(total - 1, j + InpExternalBars);
+               for(int y = j + 1; y <= upTo; y++)
+                  if(r[y].low < level) { internalPool = true; break; }
+               if(internalPool) break;
+              }
 
             int lastC = j - (reclaim - 1); if(lastC < brk) lastC = brk;
             double runLow = DBL_MAX; int extIdx = j; int rec = -1;
@@ -1126,7 +1150,7 @@ void DrawSweeps()
    double depthCap = (InpSweepMaxDepthATR > 0 && atr > 0) ? InpSweepMaxDepthATR * atr : DBL_MAX;
 
    int np = ArraySize(pIdx), drawn = 0;
-   for(int p = 0; p < np && drawn < 60; p++)
+   for(int p = np - 1; p >= 0 && drawn < 12; p--)      // newest pivots first, only the recent grabs
      {
       int    idx    = pIdx[p];
       double level  = pPx[p];
@@ -1356,6 +1380,7 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
       if(pHi[p])
         {
          for(int j = i - 1; j >= 0; j--) if(rr[j].high >= lvl) { end = rr[j].time; break; }
+         if(InpMajorUntappedOnly && end != tNow) continue;   // tapped = spent -> keep the shelf clean
          string nm = PFX + "MS_MAJH_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
          TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_LOWER);
@@ -1363,6 +1388,7 @@ void DrawMajorStructure(ENUM_TIMEFRAMES tf, int barsWanted)
       else
         {
          for(int j = i - 1; j >= 0; j--) if(rr[j].low <= lvl) { end = rr[j].time; break; }
+         if(InpMajorUntappedOnly && end != tNow) continue;
          string nm = PFX + "MS_MAJL_" + IntegerToString((int)rr[i].time);
          HLine(nm, rr[i].time, end, lvl, InpMajorStructColor, STYLE_SOLID, 2);
          TextAt(nm + "t", rr[i].time, lvl, "Major " + pLbl[p] + " ", InpMajorStructColor, ANCHOR_RIGHT_UPPER);
