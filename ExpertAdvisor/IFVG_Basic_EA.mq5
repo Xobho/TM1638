@@ -18,12 +18,12 @@
 //|  shift, HTF bias. SMT divergence is intentionally left out of v1. |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.92"
+#property version   "1.93"
 #property description "Inversion FVG scalper; simple touch-sweep + Tier 1/2/3 quality gate"
 
 // Shown on the dashboard header so the running build is always visible.
 // Keep in sync with #property version above.
-#define EA_VER "1.92"
+#define EA_VER "1.93"
 
 #include <Trade\Trade.mqh>
 CTrade g_trade;
@@ -1672,12 +1672,13 @@ void DrawEqualHL(const MqlRates &r[], int total, double atr)
            }
          if(touches < 2) continue;                     // need a real cluster
 
-         // Terminate the shelf at the FIRST candle that reaches the edge after the
-         // last equal touch -- a taken level stops being live liquidity right
-         // there, so the line ends at the sweep instead of projecting on forever.
-         datetime endT = tNow;
-         for(int j = newest - 1; j >= 0; j--)
-            if(isHigh ? (r[j].high >= edge) : (r[j].low <= edge)) { endT = r[j].time; break; }
+         // End the shelf at the MOST RECENT candle that still touches the edge.
+         // Once price leaves the level the line stops there, instead of floating
+         // across every later candle. Scan from the live bar backwards: the first
+         // candle whose range straddles the edge is the last time price was on it.
+         datetime endT = r[newest].time;                // at least span the cluster
+         for(int j = 0; j < newest; j++)                // any later re-touch extends it, then stops
+            if(r[j].low <= edge && r[j].high >= edge) { endT = r[j].time; break; }
 
          string nm = PFX + "LQ_EQ" + (isHigh ? "H_" : "L_") + IntegerToString((int)r[i].time);
          HLine(nm, r[oldest].time, endT, edge, InpEqualLiqColor, STYLE_SOLID, 2);
